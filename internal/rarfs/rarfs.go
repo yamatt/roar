@@ -414,6 +414,9 @@ func (f *RarFSFile) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off
 }
 
 // RarFileHandle handles file operations
+// Note: This implementation loads the entire file into memory on first access.
+// This is a trade-off between complexity and memory usage, suitable for moderate file sizes.
+// For very large files, consider implementing streaming reads or chunk-based caching.
 type RarFileHandle struct {
 	entry *FileEntry
 	data  []byte
@@ -448,6 +451,8 @@ func (h *RarFileHandle) ReadAt(dest []byte, off int64) ([]byte, error) {
 }
 
 // extractFile extracts a file from a RAR archive
+// Note: This scans through the archive to find the file. For archives with many files,
+// this could be optimized by caching file positions or implementing an archive index.
 func extractFile(archivePath, internalPath string) ([]byte, error) {
 	file, err := os.Open(archivePath)
 	if err != nil {
