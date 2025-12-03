@@ -1,5 +1,5 @@
 # Binaries
-roar
+/roar
 *.exe
 *.exe~
 *.dll
