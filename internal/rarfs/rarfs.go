@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -73,8 +72,11 @@ type RarFS struct {
 	// mu protects all the above maps
 	mu sync.RWMutex
 
-	// scanMu protects scanningDirs to coordinate concurrent scans
+	// scanMu protects scanningDirs and scanCond
 	scanMu sync.Mutex
+
+	// scanCond is used to signal when a directory scan completes
+	scanCond *sync.Cond
 }
 
 // FileEntry represents a file within a RAR archive or a pass-through file
@@ -225,6 +227,7 @@ func NewRarFS(sourceDir string) (*RarFS, error) {
 		pathToInode:    make(map[string]uint64),
 		scanningDirs:   make(map[string]bool),
 	}
+	rfs.scanCond = sync.NewCond(&rfs.scanMu)
 
 	if err := rfs.scan(); err != nil {
 		return nil, err
@@ -384,20 +387,9 @@ func (r *RarFS) ensureDirScanned(relDir string) {
 	// Check if another goroutine is already scanning this directory
 	// Use a separate mutex to coordinate scans without blocking reads
 	r.scanMu.Lock()
-	if r.scanningDirs[relDir] {
-		r.scanMu.Unlock()
-		// Another goroutine is scanning - wait for it to complete
-		// by spinning on scannedDirs (which is set when scan completes)
-		for {
-			r.mu.RLock()
-			done := r.scannedDirs[relDir]
-			r.mu.RUnlock()
-			if done {
-				return
-			}
-			// Small sleep to avoid busy waiting
-			time.Sleep(10 * time.Millisecond)
-		}
+	for r.scanningDirs[relDir] {
+		// Another goroutine is scanning - wait for it to complete using condition variable
+		r.scanCond.Wait()
 	}
 	// Double-check under the main lock that it's not already scanned
 	r.mu.RLock()
@@ -411,6 +403,9 @@ func (r *RarFS) ensureDirScanned(relDir string) {
 	// Mark that we're scanning this directory
 	r.scanningDirs[relDir] = true
 	r.scanMu.Unlock()
+
+	// Use defer to ensure cleanup always happens
+	defer r.cleanupScanningMarker(relDir)
 
 	logger.Debug("lazy scanning directory for RAR archives", "path", relDir)
 
@@ -447,12 +442,8 @@ func (r *RarFS) ensureDirScanned(relDir string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Double-check in case another goroutine completed first
+	// Double-check in case another goroutine completed first (shouldn't happen with current logic)
 	if r.scannedDirs[relDir] {
-		// Clean up scanning marker
-		r.scanMu.Lock()
-		delete(r.scanningDirs, relDir)
-		r.scanMu.Unlock()
 		return
 	}
 
@@ -482,10 +473,13 @@ func (r *RarFS) ensureDirScanned(relDir string) {
 
 	// Mark as scanned
 	r.scannedDirs[relDir] = true
+}
 
-	// Clean up scanning marker
+// cleanupScanningMarker removes the scanning marker and signals waiting goroutines
+func (r *RarFS) cleanupScanningMarker(relDir string) {
 	r.scanMu.Lock()
 	delete(r.scanningDirs, relDir)
+	r.scanCond.Broadcast()
 	r.scanMu.Unlock()
 }
 
