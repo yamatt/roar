@@ -120,3 +120,41 @@ jobs:
           fi
           echo "Success: example-2 complete file found (split.part1.rar/part2.rar format)"
           cat /tmp/roar-mount/data/example-2/complete
+
+      - name: Verify example-1 pass-through file (readme.txt)
+        run: |
+          if [ ! -f /tmp/roar-mount/data/example-1/readme.txt ]; then
+            echo "Error: readme.txt not found at /tmp/roar-mount/data/example-1/readme.txt"
+            ls -lR /tmp/roar-mount || true
+            exit 1
+          fi
+          echo "Success: example-1 readme.txt pass-through file found"
+          cat /tmp/roar-mount/data/example-1/readme.txt
+          # Verify content
+          if ! grep -q "readme" /tmp/roar-mount/data/example-1/readme.txt; then
+            echo "Error: readme.txt content does not match expected"
+            exit 1
+          fi
+
+      - name: Verify example-2 pass-through file (info.nfo)
+        run: |
+          if [ ! -f /tmp/roar-mount/data/example-2/info.nfo ]; then
+            echo "Error: info.nfo not found at /tmp/roar-mount/data/example-2/info.nfo"
+            ls -lR /tmp/roar-mount || true
+            exit 1
+          fi
+          echo "Success: example-2 info.nfo pass-through file found"
+          cat /tmp/roar-mount/data/example-2/info.nfo
+          # Verify content
+          if ! grep -q "info" /tmp/roar-mount/data/example-2/info.nfo; then
+            echo "Error: info.nfo content does not match expected"
+            exit 1
+          fi
+
+      - name: Cleanup - Unmount filesystem
+        if: always()
+        run: |
+          if [ -f /tmp/roar.pid ]; then
+            kill $(cat /tmp/roar.pid) 2>/dev/null || true
+          fi
+          fusermount -u /tmp/roar-mount 2>/dev/null || true

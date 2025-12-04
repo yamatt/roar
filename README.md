@@ -5,10 +5,57 @@
 ## Features
 
 - Present RAR archive contents as a transparent virtual filesystem
-- Support for split RAR archives (.r00, .r01, .r02, etc.)
+- Support for split RAR archives:
+  - New style: `.part1.rar`, `.part2.rar`, etc.
+  - Old style: `.rar`, `.r00`, `.r01`, etc.
 - Support for RAR5 format
 - Read-only access to archive contents
+- Pass-through for non-RAR files (files that aren't RAR archives are accessible in the mounted filesystem)
 - Efficient file caching for repeated reads
+
+## Requirements
+
+### Runtime Requirements
+
+- Linux with FUSE support
+- FUSE libraries installed on your system
+
+#### Installing FUSE Libraries
+
+**Debian/Ubuntu:**
+```bash
+sudo apt-get install fuse libfuse2
+```
+
+**Fedora/RHEL/CentOS:**
+```bash
+sudo dnf install fuse fuse-libs
+```
+
+**Arch Linux:**
+```bash
+sudo pacman -S fuse2
+```
+
+### Build Requirements
+
+- Go 1.21 or later
+- FUSE development headers (for building)
+
+**Debian/Ubuntu:**
+```bash
+sudo apt-get install libfuse-dev
+```
+
+**Fedora/RHEL/CentOS:**
+```bash
+sudo dnf install fuse-devel
+```
+
+**Arch Linux:**
+```bash
+sudo pacman -S fuse2
+```
 
 ## Installation
 
@@ -50,8 +97,13 @@ Suppose you have a directory structure like this:
 │   ├── movie.rar
 │   ├── movie.r00
 │   └── movie.r01
-└── movie2/
-    └── video.rar
+├── movie2/
+│   ├── video.part1.rar
+│   ├── video.part2.rar
+│   └── video.part3.rar
+└── movie3/
+    ├── film.rar
+    └── info.txt
 ```
 
 Mount it with roar:
@@ -67,8 +119,11 @@ Now you can access the contents directly:
 /mnt/movies/
 ├── movie1/
 │   └── movie.mkv
-└── movie2/
-    └── video.mp4
+├── movie2/
+│   └── video.mp4
+└── movie3/
+    ├── film.avi
+    └── info.txt    # Non-RAR files are passed through
 ```
 
 To unmount:
@@ -78,11 +133,6 @@ fusermount -u /mnt/movies
 # or press Ctrl+C if running in foreground
 ```
 
-## Requirements
-
-- Linux with FUSE support
-- Go 1.21 or later (for building)
-
 ## How It Works
 
 roar uses the FUSE (Filesystem in Userspace) interface to present a virtual filesystem. When you mount a source directory:
@@ -90,6 +140,7 @@ roar uses the FUSE (Filesystem in Userspace) interface to present a virtual file
 1. roar scans all subdirectories for RAR archives
 2. It parses the archive structure to build a virtual directory tree
 3. File reads are serviced by extracting the requested portion from the archive
+4. Non-RAR files in the source directories are passed through and accessible directly
 
 The filesystem is read-only to protect your archive data.
 

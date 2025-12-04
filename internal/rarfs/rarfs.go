@@ -46,14 +46,16 @@ type RarFS struct {
 	mu sync.RWMutex
 }
 
-// FileEntry represents a file within a RAR archive
+// FileEntry represents a file within a RAR archive or a pass-through file
 type FileEntry struct {
 	Name         string
 	Size         int64
 	ModTime      int64
 	IsDir        bool
-	ArchivePath  string // Path to the .rar file
-	InternalPath string // Path within the archive
+	ArchivePath  string // Path to the .rar file (empty for pass-through files)
+	InternalPath string // Path within the archive (empty for pass-through files)
+	IsPassthrough bool   // True if this is a pass-through file (not from a RAR archive)
+	SourcePath   string // Full path to the source file (for pass-through files)
 }
 
 // isRarFile checks if a file is a RAR archive (including split archives)
@@ -62,25 +64,37 @@ func isRarFile(name string) bool {
 	if strings.HasSuffix(lower, ".rar") {
 		return true
 	}
-	// Match split RAR files like .r00, .r01, etc.
+	// Match split RAR files like .r00, .r01, .r000, .r001, etc.
 	matched, _ := regexp.MatchString(`\.r\d+$`, lower)
 	return matched
 }
 
 // isFirstRarPart checks if a file is the first part of a RAR archive
+// For new-style .partN.rar naming, only .part1.rar is the first part
+// For old-style naming, the .rar file (without .partN) is the first part
 func isFirstRarPart(name string) bool {
 	lower := strings.ToLower(name)
-	// For split archives, we only want to process the main .rar file or .r00
+
+	// Check for new-style .partN.rar naming
+	// e.g., split.part1.rar is first, split.part2.rar is not
+	if matched, _ := regexp.MatchString(`\.part\d+\.rar$`, lower); matched {
+		return strings.HasSuffix(lower, ".part1.rar")
+	}
+
+	// For standard .rar files (without .partN), it's the first part
 	// The rardecode library handles finding the other parts automatically
 	if strings.HasSuffix(lower, ".rar") {
 		return true
 	}
+
 	// For old-style splits, .r00 might be first, but .rar should exist
 	// We'll prefer .rar if it exists
 	return false
 }
 
-// findRarArchives finds all RAR archives in the given directory
+// findRarArchives finds all first-part RAR archives in the given directory
+// It identifies the first part of multi-volume archives (e.g., .part1.rar or .rar)
+// and returns only those, as the rardecode library handles finding subsequent parts
 func findRarArchives(dir string) ([]string, error) {
 	var archives []string
 
@@ -89,52 +103,68 @@ func findRarArchives(dir string) ([]string, error) {
 		return nil, err
 	}
 
-	// First pass: find all .rar files
-	rarFiles := make(map[string]bool)
+	// Find all first-part RAR files
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
-		if strings.HasSuffix(strings.ToLower(entry.Name()), ".rar") {
+		if isFirstRarPart(entry.Name()) {
 			archives = append(archives, filepath.Join(dir, entry.Name()))
-			rarFiles[entry.Name()] = true
-		}
-	}
-
-	// If no .rar files found, look for .r00 or .r01 as starting point
-	if len(archives) == 0 {
-		for _, entry := range entries {
-			if entry.IsDir() {
-				continue
-			}
-			lower := strings.ToLower(entry.Name())
-			if strings.HasSuffix(lower, ".r00") || strings.HasSuffix(lower, ".r01") {
-				// Check if there's a corresponding .rar file
-				base := entry.Name()[:len(entry.Name())-4]
-				if !rarFiles[base+".rar"] && !rarFiles[base+".RAR"] {
-					archives = append(archives, filepath.Join(dir, entry.Name()))
-				}
-			}
 		}
 	}
 
 	return archives, nil
 }
 
+// findPassthroughFiles finds all non-RAR files in the given directory
+// These files will be passed through to the virtual filesystem
+func findPassthroughFiles(dir string) ([]*FileEntry, error) {
+	var files []*FileEntry
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		// Skip RAR files (including split archives)
+		if isRarFile(entry.Name()) {
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			logger.Warn("error getting file info", "file", entry.Name(), "error", err)
+			continue
+		}
+
+		file := &FileEntry{
+			Name:          entry.Name(),
+			Size:          info.Size(),
+			ModTime:       info.ModTime().Unix(),
+			IsDir:         false,
+			IsPassthrough: true,
+			SourcePath:    filepath.Join(dir, entry.Name()),
+		}
+		files = append(files, file)
+	}
+
+	return files, nil
+}
+
 // scanArchive scans a RAR archive and returns the list of files it contains
+// Uses OpenReader to properly handle multi-volume archives
 func scanArchive(archivePath string) ([]*FileEntry, error) {
-	file, err := os.Open(archivePath)
+	reader, err := rardecode.OpenReader(archivePath)
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
-		_ = file.Close()
+		_ = reader.Close()
 	}()
-
-	reader, err := rardecode.NewReader(file)
-	if err != nil {
-		return nil, err
-	}
 
 	var entries []*FileEntry
 
@@ -213,52 +243,70 @@ func (r *RarFS) scan() error {
 
 		logger.Debug("scanning directory", "path", relDir)
 
-		archives, err := findRarArchives(path)
-		if err != nil {
-			logger.Debug("error finding archives in directory", "path", relDir, "error", err)
-			return nil
-		}
-
-		if len(archives) == 0 {
-			// No archives in this directory, but ensure the directory exists in our structure
-			r.ensureDirectoryPath(relDir)
-			return nil
-		}
-
-		logger.Info("found RAR archives", "directory", relDir, "count", len(archives))
-
 		// Ensure the directory path exists in our structure
 		r.ensureDirectoryPath(relDir)
 
-		for _, archivePath := range archives {
-			logger.Debug("scanning archive", "archive", archivePath)
-			files, err := scanArchive(archivePath)
-			if err != nil {
-				logger.Warn("error scanning archive", "archive", archivePath, "error", err)
-				continue
+		// Find and process RAR archives
+		archives, err := findRarArchives(path)
+		if err != nil {
+			logger.Debug("error finding archives in directory", "path", relDir, "error", err)
+		}
+
+		if len(archives) > 0 {
+			logger.Info("found RAR archives", "directory", relDir, "count", len(archives))
+
+			for _, archivePath := range archives {
+				logger.Debug("scanning archive", "archive", archivePath)
+				files, err := scanArchive(archivePath)
+				if err != nil {
+					logger.Warn("error scanning archive", "archive", archivePath, "error", err)
+					continue
+				}
+
+				logger.Debug("found files in archive", "archive", archivePath, "count", len(files))
+
+				for _, f := range files {
+					// Virtual path: relDir/internal_path
+					virtualPath := filepath.Join(relDir, f.InternalPath)
+					f.Name = virtualPath
+
+					if f.IsDir {
+						// Add to directories map
+						parentDir := filepath.Dir(virtualPath)
+						baseName := filepath.Base(virtualPath)
+						r.addToDirectory(parentDir, baseName)
+					} else {
+						r.fileEntries[virtualPath] = f
+						// Ensure parent directories exist in the map
+						r.ensureDirectoryPath(filepath.Dir(virtualPath))
+						// Add file to its parent directory
+						parentDir := filepath.Dir(virtualPath)
+						baseName := filepath.Base(virtualPath)
+						r.addToDirectory(parentDir, baseName)
+					}
+				}
 			}
+		}
 
-			logger.Debug("found files in archive", "archive", archivePath, "count", len(files))
+		// Find and process pass-through files (non-RAR files)
+		passthroughFiles, err := findPassthroughFiles(path)
+		if err != nil {
+			logger.Debug("error finding pass-through files in directory", "path", relDir, "error", err)
+		}
 
-			for _, f := range files {
-				// Virtual path: relDir/internal_path
-				virtualPath := filepath.Join(relDir, f.InternalPath)
+		if len(passthroughFiles) > 0 {
+			logger.Debug("found pass-through files", "directory", relDir, "count", len(passthroughFiles))
+
+			for _, f := range passthroughFiles {
+				// Virtual path: relDir/filename
+				virtualPath := filepath.Join(relDir, f.Name)
 				f.Name = virtualPath
 
-				if f.IsDir {
-					// Add to directories map
-					parentDir := filepath.Dir(virtualPath)
-					baseName := filepath.Base(virtualPath)
-					r.addToDirectory(parentDir, baseName)
-				} else {
-					r.fileEntries[virtualPath] = f
-					// Ensure parent directories exist in the map
-					r.ensureDirectoryPath(filepath.Dir(virtualPath))
-					// Add file to its parent directory
-					parentDir := filepath.Dir(virtualPath)
-					baseName := filepath.Base(virtualPath)
-					r.addToDirectory(parentDir, baseName)
-				}
+				r.fileEntries[virtualPath] = f
+				// Add file to its parent directory
+				parentDir := filepath.Dir(virtualPath)
+				baseName := filepath.Base(virtualPath)
+				r.addToDirectory(parentDir, baseName)
 			}
 		}
 
@@ -486,9 +534,16 @@ type RarFileHandle struct {
 }
 
 // ReadAt reads data at the specified offset using streaming extraction
+// For pass-through files, reads directly from the source file
 func (h *RarFileHandle) ReadAt(dest []byte, off int64) ([]byte, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	// Handle pass-through files
+	if h.entry.IsPassthrough {
+		logger.Debug("reading pass-through file", "file", h.entry.SourcePath, "offset", off, "size", len(dest))
+		return readPassthroughFileRange(h.entry.SourcePath, off, int64(len(dest)))
+	}
 
 	logger.Debug("reading file", "file", h.entry.InternalPath, "offset", off, "size", len(dest))
 
@@ -501,16 +556,14 @@ func (h *RarFileHandle) ReadAt(dest []byte, off int64) ([]byte, error) {
 	return data, nil
 }
 
-// extractFileRange extracts a specific range of bytes from a file in a RAR archive
-// This streams through the archive and only reads the requested portion,
-// avoiding loading the entire file into memory
-func extractFileRange(archivePath, internalPath string, offset, length int64) ([]byte, error) {
+// readPassthroughFileRange reads a range of bytes from a regular file
+func readPassthroughFileRange(sourcePath string, offset, length int64) ([]byte, error) {
 	// Cap the read size to prevent excessive memory allocation
 	if length > maxReadSize {
 		length = maxReadSize
 	}
 
-	file, err := os.Open(archivePath)
+	file, err := os.Open(sourcePath)
 	if err != nil {
 		return nil, err
 	}
@@ -518,10 +571,45 @@ func extractFileRange(archivePath, internalPath string, offset, length int64) ([
 		_ = file.Close()
 	}()
 
-	reader, err := rardecode.NewReader(file)
+	// Seek to offset
+	_, err = file.Seek(offset, io.SeekStart)
 	if err != nil {
 		return nil, err
 	}
+
+	// Read the requested length
+	result := make([]byte, length)
+	n, err := io.ReadFull(file, result)
+	if err == io.EOF || err == io.ErrUnexpectedEOF {
+		// Partial read at end of file
+		if n == 0 {
+			return nil, io.EOF
+		}
+		return result[:n], nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return result[:n], nil
+}
+
+// extractFileRange extracts a specific range of bytes from a file in a RAR archive
+// This streams through the archive and only reads the requested portion,
+// avoiding loading the entire file into memory
+// Uses OpenReader to properly handle multi-volume archives
+func extractFileRange(archivePath, internalPath string, offset, length int64) ([]byte, error) {
+	// Cap the read size to prevent excessive memory allocation
+	if length > maxReadSize {
+		length = maxReadSize
+	}
+
+	reader, err := rardecode.OpenReader(archivePath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = reader.Close()
+	}()
 
 	for {
 		header, err := reader.Next()

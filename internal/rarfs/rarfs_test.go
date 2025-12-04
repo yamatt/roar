@@ -42,6 +42,10 @@ func TestIsFirstRarPart(t *testing.T) {
 		{"uppercase rar", "ARCHIVE.RAR", true},
 		{"split r00", "archive.r00", false},
 		{"split r01", "archive.r01", false},
+		{"new style part1", "archive.part1.rar", true},
+		{"new style part2", "archive.part2.rar", false},
+		{"new style part10", "archive.part10.rar", false},
+		{"uppercase part1", "ARCHIVE.PART1.RAR", true},
 	}
 
 	for _, tt := range tests {
@@ -97,6 +101,53 @@ func TestFindRarArchivesNonExistent(t *testing.T) {
 	_, err := findRarArchives("/nonexistent/path")
 	if err == nil {
 		t.Error("Expected error for non-existent directory")
+	}
+}
+
+func TestFindPassthroughFiles(t *testing.T) {
+	// Create a temporary directory structure
+	tempDir := t.TempDir()
+
+	// Create test files - a mix of RAR and non-RAR files
+	rarFile := filepath.Join(tempDir, "test.rar")
+	if err := os.WriteFile(rarFile, []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	splitFile := filepath.Join(tempDir, "split.r01")
+	if err := os.WriteFile(splitFile, []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Non-RAR files that should be passed through
+	txtFile := filepath.Join(tempDir, "readme.txt")
+	if err := os.WriteFile(txtFile, []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	nfoFile := filepath.Join(tempDir, "info.nfo")
+	if err := os.WriteFile(nfoFile, []byte("info"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := findPassthroughFiles(tempDir)
+	if err != nil {
+		t.Fatalf("findPassthroughFiles failed: %v", err)
+	}
+
+	// Should find 2 pass-through files (readme.txt and info.nfo)
+	if len(files) != 2 {
+		t.Errorf("Expected 2 pass-through files, got %d", len(files))
+	}
+
+	// Check that the files are marked as pass-through
+	for _, f := range files {
+		if !f.IsPassthrough {
+			t.Errorf("Expected file %s to be marked as pass-through", f.Name)
+		}
+		if f.SourcePath == "" {
+			t.Errorf("Expected file %s to have a source path", f.Name)
+		}
 	}
 }
 
@@ -264,5 +315,219 @@ func TestAddToDirectory(t *testing.T) {
 	rfs.addToDirectory("parent", "child2")
 	if len(rfs.directories["parent"]) != 2 {
 		t.Errorf("Expected 2 items, got %d", len(rfs.directories["parent"]))
+	}
+}
+
+// TestScanArchiveOldStyle tests scanning old-style split archives (.rar, .r00, .r01)
+func TestScanArchiveOldStyle(t *testing.T) {
+	archivePath := filepath.Join("..", "..", "tests", "data", "example-1", "split.rar")
+	
+	// Check if test data exists
+	if _, err := os.Stat(archivePath); os.IsNotExist(err) {
+		t.Skip("Test data not found, skipping")
+	}
+
+	entries, err := scanArchive(archivePath)
+	if err != nil {
+		t.Fatalf("scanArchive failed: %v", err)
+	}
+
+	if len(entries) == 0 {
+		t.Error("Expected at least one file in archive")
+	}
+
+	// Check that we found the expected file
+	found := false
+	for _, entry := range entries {
+		if entry.Name == "complete" {
+			found = true
+			if entry.Size != 2048 {
+				t.Errorf("Expected file size 2048, got %d", entry.Size)
+			}
+			if entry.IsPassthrough {
+				t.Error("Archive file should not be marked as pass-through")
+			}
+		}
+	}
+	if !found {
+		t.Error("Expected to find 'complete' file in archive")
+	}
+}
+
+// TestScanArchiveNewStyle tests scanning new-style split archives (.part1.rar, .part2.rar)
+func TestScanArchiveNewStyle(t *testing.T) {
+	archivePath := filepath.Join("..", "..", "tests", "data", "example-2", "split.part1.rar")
+	
+	// Check if test data exists
+	if _, err := os.Stat(archivePath); os.IsNotExist(err) {
+		t.Skip("Test data not found, skipping")
+	}
+
+	entries, err := scanArchive(archivePath)
+	if err != nil {
+		t.Fatalf("scanArchive failed: %v", err)
+	}
+
+	if len(entries) == 0 {
+		t.Error("Expected at least one file in archive")
+	}
+
+	// Check that we found the expected file
+	found := false
+	for _, entry := range entries {
+		if entry.Name == "complete" {
+			found = true
+			if entry.Size != 2048 {
+				t.Errorf("Expected file size 2048, got %d", entry.Size)
+			}
+		}
+	}
+	if !found {
+		t.Error("Expected to find 'complete' file in archive")
+	}
+}
+
+// TestPassthroughFilesWithTestData tests pass-through functionality with actual test data
+func TestPassthroughFilesWithTestData(t *testing.T) {
+	example1Path := filepath.Join("..", "..", "tests", "data", "example-1")
+	
+	// Check if test data exists
+	if _, err := os.Stat(example1Path); os.IsNotExist(err) {
+		t.Skip("Test data not found, skipping")
+	}
+
+	files, err := findPassthroughFiles(example1Path)
+	if err != nil {
+		t.Fatalf("findPassthroughFiles failed: %v", err)
+	}
+
+	// Should find readme.txt as a pass-through file
+	found := false
+	for _, f := range files {
+		if f.Name == "readme.txt" {
+			found = true
+			if !f.IsPassthrough {
+				t.Error("Expected readme.txt to be marked as pass-through")
+			}
+			if f.SourcePath == "" {
+				t.Error("Expected readme.txt to have a source path")
+			}
+			if f.Size == 0 {
+				t.Error("Expected readme.txt to have non-zero size")
+			}
+		}
+	}
+	if !found {
+		t.Error("Expected to find readme.txt as pass-through file")
+	}
+}
+
+// TestNewRarFSWithTestData tests the full filesystem scan with actual test data
+func TestNewRarFSWithTestData(t *testing.T) {
+	testDataPath := filepath.Join("..", "..", "tests", "data")
+	
+	// Check if test data exists
+	if _, err := os.Stat(testDataPath); os.IsNotExist(err) {
+		t.Skip("Test data not found, skipping")
+	}
+
+	rfs, err := NewRarFS(testDataPath)
+	if err != nil {
+		t.Fatalf("NewRarFS failed: %v", err)
+	}
+
+	// Check that we have directories for example-1 and example-2
+	foundExample1 := false
+	foundExample2 := false
+	for _, d := range rfs.directories[""] {
+		if d == "example-1" {
+			foundExample1 = true
+		}
+		if d == "example-2" {
+			foundExample2 = true
+		}
+	}
+	if !foundExample1 {
+		t.Error("Expected 'example-1' directory to be registered")
+	}
+	if !foundExample2 {
+		t.Error("Expected 'example-2' directory to be registered")
+	}
+
+	// Check for files from archives
+	if _, ok := rfs.fileEntries["example-1/complete"]; !ok {
+		t.Error("Expected 'example-1/complete' file from RAR archive")
+	}
+	if _, ok := rfs.fileEntries["example-2/complete"]; !ok {
+		t.Error("Expected 'example-2/complete' file from RAR archive")
+	}
+
+	// Check for pass-through files
+	if entry, ok := rfs.fileEntries["example-1/readme.txt"]; !ok {
+		t.Error("Expected 'example-1/readme.txt' pass-through file")
+	} else {
+		if !entry.IsPassthrough {
+			t.Error("Expected readme.txt to be marked as pass-through")
+		}
+	}
+
+	if entry, ok := rfs.fileEntries["example-2/info.nfo"]; !ok {
+		t.Error("Expected 'example-2/info.nfo' pass-through file")
+	} else {
+		if !entry.IsPassthrough {
+			t.Error("Expected info.nfo to be marked as pass-through")
+		}
+	}
+}
+
+// TestReadPassthroughFile tests reading content from a pass-through file
+func TestReadPassthroughFile(t *testing.T) {
+	testFilePath := filepath.Join("..", "..", "tests", "data", "example-1", "readme.txt")
+	
+	// Check if test data exists
+	if _, err := os.Stat(testFilePath); os.IsNotExist(err) {
+		t.Skip("Test data not found, skipping")
+	}
+
+	// Read using the pass-through function
+	data, err := readPassthroughFileRange(testFilePath, 0, 100)
+	if err != nil {
+		t.Fatalf("readPassthroughFileRange failed: %v", err)
+	}
+
+	if len(data) == 0 {
+		t.Error("Expected non-empty data from pass-through file")
+	}
+
+	// Verify content starts with expected text
+	expectedPrefix := "This is a readme"
+	if len(data) < len(expectedPrefix) {
+		t.Errorf("Expected data to be at least %d bytes, got %d bytes: %q", len(expectedPrefix), len(data), string(data))
+	} else if string(data[:len(expectedPrefix)]) != expectedPrefix {
+		t.Errorf("Expected data to start with %q, got %q", expectedPrefix, string(data[:len(expectedPrefix)]))
+	}
+}
+
+// TestExtractFileFromArchive tests extracting content from a RAR archive
+func TestExtractFileFromArchive(t *testing.T) {
+	archivePath := filepath.Join("..", "..", "tests", "data", "example-1", "split.rar")
+	
+	// Check if test data exists
+	if _, err := os.Stat(archivePath); os.IsNotExist(err) {
+		t.Skip("Test data not found, skipping")
+	}
+
+	// Extract some data from the archive
+	data, err := extractFileRange(archivePath, "complete", 0, 100)
+	if err != nil {
+		t.Fatalf("extractFileRange failed: %v", err)
+	}
+
+	if len(data) == 0 {
+		t.Error("Expected non-empty data from archive")
+	}
+
+	if len(data) != 100 {
+		t.Errorf("Expected 100 bytes, got %d", len(data))
 	}
 }
