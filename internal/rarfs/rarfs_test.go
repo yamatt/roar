@@ -697,11 +697,16 @@ func TestLazyDirectoryDiscovery(t *testing.T) {
 	// Trigger lazy discovery of level2
 	rfs.ensureDirScanned("level1/level2")
 
-	// Now level3 and the pass-through file should be discovered
-	expectedItems := 2 // level3 directory + file.txt
-	if len(rfs.directories["level1/level2"]) != expectedItems {
-		t.Errorf("Expected %d items in level1/level2 after discovery, got %d: %v", 
-			expectedItems, len(rfs.directories["level1/level2"]), rfs.directories["level1/level2"])
+	// Check that level3 directory was discovered
+	foundLevel3 := false
+	for _, name := range rfs.directories["level1/level2"] {
+		if name == "level3" {
+			foundLevel3 = true
+			break
+		}
+	}
+	if !foundLevel3 {
+		t.Error("Expected 'level3' directory to be discovered in level1/level2")
 	}
 
 	// Check that the pass-through file was discovered

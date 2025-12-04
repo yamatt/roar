@@ -327,7 +327,7 @@ func (r *RarFS) ensureDirDiscovered(relDir string) {
 		r.mu.RUnlock()
 		return
 	}
-	absPath, hasPending := r.pendingDirs[relDir]
+	_, hasPending := r.pendingDirs[relDir]
 	r.mu.RUnlock()
 
 	if !hasPending {
@@ -340,6 +340,12 @@ func (r *RarFS) ensureDirDiscovered(relDir string) {
 
 	// Double-check after acquiring write lock
 	if r.discoveredDirs[relDir] {
+		return
+	}
+
+	// Re-check pendingDirs under write lock
+	absPath, hasPending := r.pendingDirs[relDir]
+	if !hasPending {
 		return
 	}
 
@@ -366,7 +372,7 @@ func (r *RarFS) ensureDirScanned(relDir string) {
 		r.mu.RUnlock()
 		return
 	}
-	absPath, hasPending := r.pendingDirs[relDir]
+	_, hasPending := r.pendingDirs[relDir]
 	r.mu.RUnlock()
 
 	if !hasPending {
@@ -379,6 +385,12 @@ func (r *RarFS) ensureDirScanned(relDir string) {
 
 	// Double-check after acquiring write lock
 	if r.scannedDirs[relDir] {
+		return
+	}
+
+	// Re-check pendingDirs under write lock
+	absPath, hasPending := r.pendingDirs[relDir]
+	if !hasPending {
 		return
 	}
 
