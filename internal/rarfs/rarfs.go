@@ -25,6 +25,13 @@ var logger = slog.Default()
 // This prevents excessive memory allocation from large read requests
 const maxReadSize = 1 << 20 // 1MB
 
+// attrValidDuration is how long FUSE caches file/directory attributes
+// A longer duration reduces Nautilus/file manager refresh issues
+const attrValidDuration = 60.0 // 60 seconds
+
+// entryValidDuration is how long FUSE caches directory entry lookups
+const entryValidDuration = 60.0 // 60 seconds
+
 // SetLogger sets the logger for the rarfs package
 func SetLogger(l *slog.Logger) {
 	logger = l
@@ -42,6 +49,18 @@ type RarFS struct {
 
 	// directories maps virtual paths to directory info
 	directories map[string][]string
+
+	// scannedDirs tracks which directories have had their RAR archives scanned
+	scannedDirs map[string]bool
+
+	// pendingDirs maps virtual paths to their absolute source paths for lazy scanning
+	pendingDirs map[string]string
+
+	// inodeCounter is used to generate stable inode numbers
+	inodeCounter uint64
+
+	// pathToInode maps virtual paths to stable inode numbers
+	pathToInode map[string]uint64
 
 	mu sync.RWMutex
 }
@@ -194,9 +213,13 @@ func scanArchive(archivePath string) ([]*FileEntry, error) {
 // NewRarFS creates a new RarFS rooted at the given source directory
 func NewRarFS(sourceDir string) (*RarFS, error) {
 	rfs := &RarFS{
-		sourceDir:   sourceDir,
-		fileEntries: make(map[string]*FileEntry),
-		directories: make(map[string][]string),
+		sourceDir:    sourceDir,
+		fileEntries:  make(map[string]*FileEntry),
+		directories:  make(map[string][]string),
+		scannedDirs:  make(map[string]bool),
+		pendingDirs:  make(map[string]string),
+		inodeCounter: 1, // Start at 1; 0 is reserved
+		pathToInode:  make(map[string]uint64),
 	}
 
 	if err := rfs.scan(); err != nil {
@@ -207,6 +230,8 @@ func NewRarFS(sourceDir string) (*RarFS, error) {
 }
 
 // scan walks the source directory and builds the virtual filesystem structure
+// It only discovers directories and pass-through files at startup.
+// RAR archive scanning is deferred until directory contents are accessed.
 func (r *RarFS) scan() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -214,8 +239,12 @@ func (r *RarFS) scan() error {
 	// Clear existing entries
 	r.fileEntries = make(map[string]*FileEntry)
 	r.directories = make(map[string][]string)
+	r.scannedDirs = make(map[string]bool)
+	r.pendingDirs = make(map[string]string)
+	r.pathToInode = make(map[string]uint64)
+	r.inodeCounter = 1
 
-	logger.Info("scanning source directory", "path", r.sourceDir)
+	logger.Info("scanning source directory structure", "path", r.sourceDir)
 
 	// Walk the source directory recursively
 	err := filepath.WalkDir(r.sourceDir, func(path string, d os.DirEntry, err error) error {
@@ -241,54 +270,15 @@ func (r *RarFS) scan() error {
 			return nil
 		}
 
-		logger.Debug("scanning directory", "path", relDir)
+		logger.Debug("discovered directory", "path", relDir)
 
 		// Ensure the directory path exists in our structure
 		r.ensureDirectoryPath(relDir)
 
-		// Find and process RAR archives
-		archives, err := findRarArchives(path)
-		if err != nil {
-			logger.Debug("error finding archives in directory", "path", relDir, "error", err)
-		}
+		// Store the absolute path for lazy scanning later
+		r.pendingDirs[relDir] = path
 
-		if len(archives) > 0 {
-			logger.Info("found RAR archives", "directory", relDir, "count", len(archives))
-
-			for _, archivePath := range archives {
-				logger.Debug("scanning archive", "archive", archivePath)
-				files, err := scanArchive(archivePath)
-				if err != nil {
-					logger.Warn("error scanning archive", "archive", archivePath, "error", err)
-					continue
-				}
-
-				logger.Debug("found files in archive", "archive", archivePath, "count", len(files))
-
-				for _, f := range files {
-					// Virtual path: relDir/internal_path
-					virtualPath := filepath.Join(relDir, f.InternalPath)
-					f.Name = virtualPath
-
-					if f.IsDir {
-						// Add to directories map
-						parentDir := filepath.Dir(virtualPath)
-						baseName := filepath.Base(virtualPath)
-						r.addToDirectory(parentDir, baseName)
-					} else {
-						r.fileEntries[virtualPath] = f
-						// Ensure parent directories exist in the map
-						r.ensureDirectoryPath(filepath.Dir(virtualPath))
-						// Add file to its parent directory
-						parentDir := filepath.Dir(virtualPath)
-						baseName := filepath.Base(virtualPath)
-						r.addToDirectory(parentDir, baseName)
-					}
-				}
-			}
-		}
-
-		// Find and process pass-through files (non-RAR files)
+		// Find and process pass-through files immediately (they're quick to discover)
 		passthroughFiles, err := findPassthroughFiles(path)
 		if err != nil {
 			logger.Debug("error finding pass-through files in directory", "path", relDir, "error", err)
@@ -318,8 +308,81 @@ func (r *RarFS) scan() error {
 		return err
 	}
 
-	logger.Info("scan complete", "files", len(r.fileEntries), "directories", len(r.directories))
+	logger.Info("directory scan complete", "directories", len(r.directories), "pendingDirs", len(r.pendingDirs))
 	return nil
+}
+
+// ensureDirScanned ensures that the RAR archives in a directory have been scanned
+// This is called lazily when directory contents are accessed
+func (r *RarFS) ensureDirScanned(relDir string) {
+	// Check if already scanned (with read lock first for performance)
+	r.mu.RLock()
+	if r.scannedDirs[relDir] {
+		r.mu.RUnlock()
+		return
+	}
+	absPath, hasPending := r.pendingDirs[relDir]
+	r.mu.RUnlock()
+
+	if !hasPending {
+		return
+	}
+
+	// Need to scan - acquire write lock
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Double-check after acquiring write lock
+	if r.scannedDirs[relDir] {
+		return
+	}
+
+	logger.Debug("lazy scanning directory for RAR archives", "path", relDir)
+
+	// Find and process RAR archives
+	archives, err := findRarArchives(absPath)
+	if err != nil {
+		logger.Debug("error finding archives in directory", "path", relDir, "error", err)
+	}
+
+	if len(archives) > 0 {
+		logger.Info("found RAR archives", "directory", relDir, "count", len(archives))
+
+		for _, archivePath := range archives {
+			logger.Debug("scanning archive", "archive", archivePath)
+			files, err := scanArchive(archivePath)
+			if err != nil {
+				logger.Warn("error scanning archive", "archive", archivePath, "error", err)
+				continue
+			}
+
+			logger.Debug("found files in archive", "archive", archivePath, "count", len(files))
+
+			for _, f := range files {
+				// Virtual path: relDir/internal_path
+				virtualPath := filepath.Join(relDir, f.InternalPath)
+				f.Name = virtualPath
+
+				if f.IsDir {
+					// Add to directories map
+					parentDir := filepath.Dir(virtualPath)
+					baseName := filepath.Base(virtualPath)
+					r.addToDirectory(parentDir, baseName)
+				} else {
+					r.fileEntries[virtualPath] = f
+					// Ensure parent directories exist in the map
+					r.ensureDirectoryPath(filepath.Dir(virtualPath))
+					// Add file to its parent directory
+					parentDir := filepath.Dir(virtualPath)
+					baseName := filepath.Base(virtualPath)
+					r.addToDirectory(parentDir, baseName)
+				}
+			}
+		}
+	}
+
+	// Mark as scanned
+	r.scannedDirs[relDir] = true
 }
 
 // ensureDirectoryPath ensures all parent directories in a path exist in the directories map
@@ -343,13 +406,41 @@ func (r *RarFS) ensureDirectoryPath(path string) {
 }
 
 // addToDirectory adds a name to a directory's listing if not already present
+// Also assigns a stable inode number to the entry
 func (r *RarFS) addToDirectory(dir, name string) {
+	fullPath := name
+	if dir != "" {
+		fullPath = filepath.Join(dir, name)
+	}
 	for _, existing := range r.directories[dir] {
 		if existing == name {
 			return
 		}
 	}
 	r.directories[dir] = append(r.directories[dir], name)
+	// Assign a stable inode number to this entry
+	r.assignInode(fullPath)
+}
+
+// getInode returns a stable inode number for a given path
+// Must be called with at least a read lock held
+func (r *RarFS) getInode(path string) uint64 {
+	if ino, ok := r.pathToInode[path]; ok {
+		return ino
+	}
+	// This shouldn't happen often - we assign inodes when creating entries
+	return 0
+}
+
+// assignInode assigns a stable inode number to a path if not already assigned
+// Must be called with a write lock held
+func (r *RarFS) assignInode(path string) uint64 {
+	if ino, ok := r.pathToInode[path]; ok {
+		return ino
+	}
+	r.inodeCounter++
+	r.pathToInode[path] = r.inodeCounter
+	return r.inodeCounter
 }
 
 // RarFSRoot is the root node of the FUSE filesystem
@@ -376,8 +467,10 @@ type RarFSFile struct {
 // Ensure interfaces are implemented
 var _ fs.NodeReaddirer = (*RarFSRoot)(nil)
 var _ fs.NodeLookuper = (*RarFSRoot)(nil)
+var _ fs.NodeGetattrer = (*RarFSRoot)(nil)
 var _ fs.NodeReaddirer = (*RarFSDir)(nil)
 var _ fs.NodeLookuper = (*RarFSDir)(nil)
+var _ fs.NodeGetattrer = (*RarFSDir)(nil)
 var _ fs.NodeGetattrer = (*RarFSFile)(nil)
 var _ fs.NodeOpener = (*RarFSFile)(nil)
 var _ fs.NodeReader = (*RarFSFile)(nil)
@@ -385,6 +478,8 @@ var _ fs.NodeReader = (*RarFSFile)(nil)
 // Getattr returns file attributes for root
 func (r *RarFSRoot) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = 0755 | syscall.S_IFDIR
+	out.Ino = 1 // Root always has inode 1
+	out.SetTimeout(attrValidDuration)
 	return 0
 }
 
@@ -396,9 +491,11 @@ func (r *RarFSRoot) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	var entries []fuse.DirEntry
 
 	for _, name := range r.rfs.directories[""] {
+		ino := r.rfs.getInode(name)
 		entries = append(entries, fuse.DirEntry{
 			Name: name,
 			Mode: syscall.S_IFDIR,
+			Ino:  ino,
 		})
 	}
 
@@ -408,40 +505,59 @@ func (r *RarFSRoot) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 // Lookup finds a child node by name
 func (r *RarFSRoot) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	r.rfs.mu.RLock()
-	defer r.rfs.mu.RUnlock()
 
 	// Check if it's a directory
 	if _, ok := r.rfs.directories[name]; ok {
+		ino := r.rfs.getInode(name)
+		r.rfs.mu.RUnlock()
 		child := &RarFSDir{rfs: r.rfs, path: name}
-		return r.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFDIR}), 0
+		out.SetEntryTimeout(entryValidDuration)
+		out.SetAttrTimeout(attrValidDuration)
+		return r.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFDIR, Ino: ino}), 0
 	}
 
 	// Check if the name exists in root directory listings
 	for _, d := range r.rfs.directories[""] {
 		if d == name {
+			ino := r.rfs.getInode(name)
+			r.rfs.mu.RUnlock()
 			child := &RarFSDir{rfs: r.rfs, path: name}
-			return r.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFDIR}), 0
+			out.SetEntryTimeout(entryValidDuration)
+			out.SetAttrTimeout(attrValidDuration)
+			return r.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFDIR, Ino: ino}), 0
 		}
 	}
 
 	// Check if it's a file in root
 	if entry, ok := r.rfs.fileEntries[name]; ok {
+		ino := r.rfs.getInode(name)
+		r.rfs.mu.RUnlock()
 		child := &RarFSFile{rfs: r.rfs, path: name, entry: entry}
 		out.Size = uint64(entry.Size)
-		return r.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFREG}), 0
+		out.SetEntryTimeout(entryValidDuration)
+		out.SetAttrTimeout(attrValidDuration)
+		return r.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFREG, Ino: ino}), 0
 	}
 
+	r.rfs.mu.RUnlock()
 	return nil, syscall.ENOENT
 }
 
 // Getattr returns file attributes for directory
 func (d *RarFSDir) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = 0755 | syscall.S_IFDIR
+	d.rfs.mu.RLock()
+	out.Ino = d.rfs.getInode(d.path)
+	d.rfs.mu.RUnlock()
+	out.SetTimeout(attrValidDuration)
 	return 0
 }
 
 // Readdir lists the contents of a directory
 func (d *RarFSDir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	// Ensure RAR archives in this directory have been scanned (lazy loading)
+	d.rfs.ensureDirScanned(d.path)
+
 	d.rfs.mu.RLock()
 	defer d.rfs.mu.RUnlock()
 
@@ -449,15 +565,18 @@ func (d *RarFSDir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 
 	for _, name := range d.rfs.directories[d.path] {
 		fullPath := filepath.Join(d.path, name)
+		ino := d.rfs.getInode(fullPath)
 		if _, ok := d.rfs.fileEntries[fullPath]; ok {
 			entries = append(entries, fuse.DirEntry{
 				Name: name,
 				Mode: syscall.S_IFREG,
+				Ino:  ino,
 			})
 		} else {
 			entries = append(entries, fuse.DirEntry{
 				Name: name,
 				Mode: syscall.S_IFDIR,
+				Ino:  ino,
 			})
 		}
 	}
@@ -467,33 +586,48 @@ func (d *RarFSDir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 
 // Lookup finds a child node by name in a directory
 func (d *RarFSDir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	// Ensure RAR archives in this directory have been scanned (lazy loading)
+	d.rfs.ensureDirScanned(d.path)
+
 	d.rfs.mu.RLock()
-	defer d.rfs.mu.RUnlock()
 
 	fullPath := filepath.Join(d.path, name)
 
 	// Check if it's a file
 	if entry, ok := d.rfs.fileEntries[fullPath]; ok {
+		ino := d.rfs.getInode(fullPath)
+		d.rfs.mu.RUnlock()
 		child := &RarFSFile{rfs: d.rfs, path: fullPath, entry: entry}
 		out.Size = uint64(entry.Size)
-		return d.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFREG}), 0
+		out.SetEntryTimeout(entryValidDuration)
+		out.SetAttrTimeout(attrValidDuration)
+		return d.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFREG, Ino: ino}), 0
 	}
 
 	// Check if it's a directory
 	if _, ok := d.rfs.directories[fullPath]; ok {
+		ino := d.rfs.getInode(fullPath)
+		d.rfs.mu.RUnlock()
 		child := &RarFSDir{rfs: d.rfs, path: fullPath}
-		return d.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFDIR}), 0
+		out.SetEntryTimeout(entryValidDuration)
+		out.SetAttrTimeout(attrValidDuration)
+		return d.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFDIR, Ino: ino}), 0
 	}
 
 	// Check if it's in the directory listing
 	for _, n := range d.rfs.directories[d.path] {
 		if n == name {
 			// It's a directory that was implicitly created
+			ino := d.rfs.getInode(fullPath)
+			d.rfs.mu.RUnlock()
 			child := &RarFSDir{rfs: d.rfs, path: fullPath}
-			return d.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFDIR}), 0
+			out.SetEntryTimeout(entryValidDuration)
+			out.SetAttrTimeout(attrValidDuration)
+			return d.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFDIR, Ino: ino}), 0
 		}
 	}
 
+	d.rfs.mu.RUnlock()
 	return nil, syscall.ENOENT
 }
 
@@ -501,6 +635,10 @@ func (d *RarFSDir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 func (f *RarFSFile) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = 0644 | syscall.S_IFREG
 	out.Size = uint64(f.entry.Size)
+	f.rfs.mu.RLock()
+	out.Ino = f.rfs.getInode(f.path)
+	f.rfs.mu.RUnlock()
+	out.SetTimeout(attrValidDuration)
 	out.SetTimes(nil, nil, nil)
 	return 0
 }

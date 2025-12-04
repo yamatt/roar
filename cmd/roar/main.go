@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
@@ -15,6 +16,30 @@ import (
 )
 
 var version = "dev"
+
+// checkFuseAvailability checks if FUSE libraries are installed and available.
+// It verifies both the fusermount command and /dev/fuse device.
+func checkFuseAvailability(logger *slog.Logger) error {
+	// Check for fusermount command
+	if _, err := exec.LookPath("fusermount"); err != nil {
+		return fmt.Errorf("fusermount command not found. Please install FUSE libraries:\n" +
+			"  Debian/Ubuntu: sudo apt-get install fuse libfuse2\n" +
+			"  Fedora/RHEL:   sudo dnf install fuse fuse-libs\n" +
+			"  Arch Linux:    sudo pacman -S fuse2")
+	}
+
+	// Check for /dev/fuse device
+	if _, err := os.Stat("/dev/fuse"); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("/dev/fuse not found. FUSE kernel module may not be loaded.\n" +
+				"Try loading it with: sudo modprobe fuse")
+		}
+		return fmt.Errorf("error accessing /dev/fuse: %w", err)
+	}
+
+	logger.Debug("FUSE libraries available")
+	return nil
+}
 
 func main() {
 	var showVersion bool
@@ -106,6 +131,12 @@ func main() {
 	}
 	if !mountInfo.IsDir() {
 		logger.Error("mount point is not a directory", "path", mountPoint)
+		os.Exit(1)
+	}
+
+	// Check if FUSE libraries are installed
+	if err := checkFuseAvailability(logger); err != nil {
+		logger.Error("FUSE not available", "error", err)
 		os.Exit(1)
 	}
 
