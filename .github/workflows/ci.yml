@@ -54,3 +54,9 @@ jobs:
 
       - name: Build binary
         run: go build -o roar ./cmd/roar
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: roar-binary
+          path: roar
