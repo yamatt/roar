@@ -271,8 +271,10 @@ func TestNewRarFSWithNestedSubdirectories(t *testing.T) {
 
 func TestEnsureDirectoryPath(t *testing.T) {
 	rfs := &RarFS{
-		fileEntries: make(map[string]*FileEntry),
-		directories: make(map[string][]string),
+		fileEntries:  make(map[string]*FileEntry),
+		directories:  make(map[string][]string),
+		pathToInode:  make(map[string]uint64),
+		inodeCounter: 1,
 	}
 
 	rfs.ensureDirectoryPath("a/b/c")
@@ -295,8 +297,10 @@ func TestEnsureDirectoryPath(t *testing.T) {
 
 func TestAddToDirectory(t *testing.T) {
 	rfs := &RarFS{
-		fileEntries: make(map[string]*FileEntry),
-		directories: make(map[string][]string),
+		fileEntries:  make(map[string]*FileEntry),
+		directories:  make(map[string][]string),
+		pathToInode:  make(map[string]uint64),
+		inodeCounter: 1,
 	}
 
 	// Add item
@@ -454,7 +458,11 @@ func TestNewRarFSWithTestData(t *testing.T) {
 		t.Error("Expected 'example-2' directory to be registered")
 	}
 
-	// Check for files from archives
+	// Trigger lazy scanning for both directories
+	rfs.ensureDirScanned("example-1")
+	rfs.ensureDirScanned("example-2")
+
+	// Check for files from archives (now available after lazy scan)
 	if _, ok := rfs.fileEntries["example-1/complete"]; !ok {
 		t.Error("Expected 'example-1/complete' file from RAR archive")
 	}
@@ -529,5 +537,90 @@ func TestExtractFileFromArchive(t *testing.T) {
 
 	if len(data) != 100 {
 		t.Errorf("Expected 100 bytes, got %d", len(data))
+	}
+}
+
+// TestLazyScanning tests that RAR archives are only scanned when directories are accessed
+func TestLazyScanning(t *testing.T) {
+	testDataPath := filepath.Join("..", "..", "tests", "data")
+	
+	// Check if test data exists
+	if _, err := os.Stat(testDataPath); os.IsNotExist(err) {
+		t.Skip("Test data not found, skipping")
+	}
+
+	rfs, err := NewRarFS(testDataPath)
+	if err != nil {
+		t.Fatalf("NewRarFS failed: %v", err)
+	}
+
+	// Initially, directories should NOT be scanned (files from RAR archives not present)
+	if _, ok := rfs.fileEntries["example-1/complete"]; ok {
+		t.Error("Files from RAR archives should not be present before directory access")
+	}
+
+	// Directories should be pending
+	if _, ok := rfs.pendingDirs["example-1"]; !ok {
+		t.Error("example-1 should be in pendingDirs")
+	}
+
+	// scannedDirs should be empty for example-1
+	if rfs.scannedDirs["example-1"] {
+		t.Error("example-1 should not be marked as scanned yet")
+	}
+
+	// Trigger lazy scan for example-1
+	rfs.ensureDirScanned("example-1")
+
+	// Now the files should be present
+	if _, ok := rfs.fileEntries["example-1/complete"]; !ok {
+		t.Error("Files from RAR archives should be present after lazy scan")
+	}
+
+	// scannedDirs should now have example-1
+	if !rfs.scannedDirs["example-1"] {
+		t.Error("example-1 should be marked as scanned after ensureDirScanned")
+	}
+
+	// example-2 should still be unscanned
+	if rfs.scannedDirs["example-2"] {
+		t.Error("example-2 should not be marked as scanned yet")
+	}
+	if _, ok := rfs.fileEntries["example-2/complete"]; ok {
+		t.Error("Files from example-2 RAR archives should not be present yet")
+	}
+}
+
+// TestStableInodes tests that inode numbers are stable and consistent
+func TestStableInodes(t *testing.T) {
+	rfs := &RarFS{
+		fileEntries:  make(map[string]*FileEntry),
+		directories:  make(map[string][]string),
+		pathToInode:  make(map[string]uint64),
+		inodeCounter: 1,
+	}
+
+	// Add directories and check inodes are assigned
+	rfs.addToDirectory("", "dir1")
+	rfs.addToDirectory("", "dir2")
+	rfs.addToDirectory("dir1", "file1")
+
+	// Verify inodes were assigned
+	ino1 := rfs.getInode("dir1")
+	ino2 := rfs.getInode("dir2")
+	ino3 := rfs.getInode("dir1/file1")
+
+	if ino1 == 0 || ino2 == 0 || ino3 == 0 {
+		t.Error("Expected non-zero inodes to be assigned")
+	}
+
+	// Verify inodes are unique
+	if ino1 == ino2 || ino1 == ino3 || ino2 == ino3 {
+		t.Error("Expected inodes to be unique")
+	}
+
+	// Verify inodes are stable (calling getInode again returns same value)
+	if rfs.getInode("dir1") != ino1 {
+		t.Error("Expected inode to be stable")
 	}
 }
