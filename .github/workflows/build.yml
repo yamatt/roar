@@ -1,9 +1,15 @@
-name: CI
+name: Test and Build
 
 on:
   push:
     branches:
       - main
+    paths:
+      - ".github/workflows/build.yml"
+      - "cmd"
+      - "internal"
+      - "go.mod"
+      - "go.sum"
 
 permissions:
   contents: read
@@ -136,18 +142,18 @@ jobs:
             exit 1
           fi
 
-      - name: Verify example-2 pass-through file (info.nfo)
+      - name: Verify example-2 pass-through file (info.txt)
         run: |
-          if [ ! -f /tmp/roar-mount/data/example-2/info.nfo ]; then
-            echo "Error: info.nfo not found at /tmp/roar-mount/data/example-2/info.nfo"
+          if [ ! -f /tmp/roar-mount/data/example-2/info.txt ]; then
+            echo "Error: info.txt not found at /tmp/roar-mount/data/example-2/info.txt"
             ls -lR /tmp/roar-mount || true
             exit 1
           fi
           echo "Success: example-2 info.nfo pass-through file found"
-          cat /tmp/roar-mount/data/example-2/info.nfo
+          cat /tmp/roar-mount/data/example-2/info.txt
           # Verify content
-          if ! grep -q "info" /tmp/roar-mount/data/example-2/info.nfo; then
-            echo "Error: info.nfo content does not match expected"
+          if ! grep -q "info" /tmp/roar-mount/data/example-2/info.txt; then
+            echo "Error: info.txt content does not match expected"
             exit 1
           fi
 
