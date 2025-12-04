@@ -6,8 +6,8 @@ on:
       - main
     paths:
       - ".github/workflows/build.yml"
-      - "cmd"
-      - "internal"
+      - "cmd/**"
+      - "internal/**"
       - "go.mod"
       - "go.sum"
 
