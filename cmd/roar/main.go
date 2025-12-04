@@ -17,16 +17,10 @@ import (
 var version = "dev"
 
 func main() {
-	var (
-		showVersion bool
-		foreground  bool
-		debug       bool
-	)
+	var showVersion bool
 
 	flag.BoolVar(&showVersion, "version", false, "Show version and exit")
 	flag.BoolVar(&showVersion, "v", false, "Show version and exit (shorthand)")
-	flag.BoolVar(&foreground, "f", false, "Run in foreground (do not daemonize)")
-	flag.BoolVar(&debug, "d", false, "Enable debug logging")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options] <source_directory> <mount_point>\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "roar presents RAR archives in a directory as a virtual filesystem.\n")
@@ -34,6 +28,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Supports split RAR files (.r00, .r01, etc.) and RAR5 format.\n\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		flag.PrintDefaults()
+		fmt.Fprintf(os.Stderr, "\nEnvironment Variables:\n")
+		fmt.Fprintf(os.Stderr, "  ROAR_LOG_LEVEL\n")
+		fmt.Fprintf(os.Stderr, "    \tSet log level (debug, info, warn, error). Default: info\n")
 	}
 	flag.Parse()
 
@@ -43,12 +40,10 @@ func main() {
 	}
 
 	// Set up structured logging
-	// Log level can be set via -d flag or ROAR_LOG_LEVEL environment variable
-	// Valid values for ROAR_LOG_LEVEL: debug, info, warn, error
+	// Log level can be set via ROAR_LOG_LEVEL environment variable
+	// Valid values: debug, info, warn, error
 	logLevel := slog.LevelInfo
-	if debug {
-		logLevel = slog.LevelDebug
-	} else if envLevel := os.Getenv("ROAR_LOG_LEVEL"); envLevel != "" {
+	if envLevel := os.Getenv("ROAR_LOG_LEVEL"); envLevel != "" {
 		switch envLevel {
 		case "debug":
 			logLevel = slog.LevelDebug
@@ -128,26 +123,15 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	if foreground {
-		// Wait for signal
+	go func() {
 		<-sigChan
 		logger.Info("received signal, unmounting...")
-		err = server.Unmount()
+		err := server.Unmount()
 		if err != nil {
 			logger.Error("error unmounting", "error", err)
 		}
-	} else {
-		// Run until unmounted
-		go func() {
-			<-sigChan
-			logger.Info("received signal, unmounting...")
-			err := server.Unmount()
-			if err != nil {
-				logger.Error("error unmounting", "error", err)
-			}
-		}()
-		server.Wait()
-	}
+	}()
+	server.Wait()
 
 	logger.Info("filesystem unmounted")
 }
