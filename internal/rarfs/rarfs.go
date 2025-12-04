@@ -24,9 +24,6 @@ type RarFS struct {
 	// sourceDir is the directory containing directories with RAR archives
 	sourceDir string
 
-	// archiveCache stores the parsed archive structure
-	archiveCache sync.Map
-
 	// fileEntries maps virtual paths to their archive info
 	fileEntries map[string]*FileEntry
 
@@ -117,7 +114,9 @@ func scanArchive(archivePath string) ([]*FileEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 
 	reader, err := rardecode.NewReader(file)
 	if err != nil {
@@ -458,7 +457,9 @@ func extractFile(archivePath, internalPath string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 
 	reader, err := rardecode.NewReader(file)
 	if err != nil {
