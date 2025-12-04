@@ -1,6 +1,6 @@
-# roar
+# roar 🦁
 
-**roar** (RAR on a Read) is a FUSE filesystem that takes a directory of directories containing RAR archives and presents the files within those archives as if there were no RAR files.
+A FUSE filesystem that takes directories containing RAR archives and presents the files within those archives as if there were no RAR files.
 
 ## Features
 
@@ -93,36 +93,36 @@ Suppose you have a directory structure like this:
 
 ```
 /data/archives/
-├── movie1/
-│   ├── movie.rar
-│   ├── movie.r00
-│   └── movie.r01
-├── movie2/
-│   ├── video.part1.rar
-│   ├── video.part2.rar
-│   └── video.part3.rar
-└── movie3/
-    ├── film.rar
+├── archive1/
+│   ├── compressed-1.rar
+│   ├── compressed-1.r00
+│   └── compressed-1.r01
+├── archive2/
+│   ├── compressed-2.part1.rar
+│   ├── compressed-2.part2.rar
+│   └── compressed-2.part3.rar
+└── archive3/
+    ├── compressed-3.rar
     └── info.txt
 ```
 
 Mount it with roar:
 
 ```bash
-mkdir /mnt/movies
-roar /data/archives /mnt/movies
+mkdir /mnt/archives
+roar /data/archives /mnt/unarchived
 ```
 
 Now you can access the contents directly:
 
 ```
-/mnt/movies/
-├── movie1/
-│   └── movie.mkv
-├── movie2/
+/mnt/unarchived/
+├── archive1/
+│   └── home-movie.mkv
+├── archive2/
 │   └── video.mp4
-└── movie3/
-    ├── film.avi
+└── archive3/
+    ├── my-project.avi
     └── info.txt    # Non-RAR files are passed through
 ```
 
