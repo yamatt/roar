@@ -35,6 +35,7 @@ roar [options] <source_directory> <mount_point>
 ### Options
 
 - `-f`: Run in foreground (do not daemonize)
+- `-d`: Enable debug logging
 - `-v`, `--version`: Show version and exit
 
 ### Example
