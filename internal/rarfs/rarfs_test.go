@@ -501,8 +501,10 @@ func TestReadPassthroughFile(t *testing.T) {
 
 	// Verify content starts with expected text
 	expectedPrefix := "This is a readme"
-	if len(data) < len(expectedPrefix) || string(data[:len(expectedPrefix)]) != expectedPrefix {
-		t.Errorf("Expected data to start with %q, got %q", expectedPrefix, string(data))
+	if len(data) < len(expectedPrefix) {
+		t.Errorf("Expected data to be at least %d bytes, got %d bytes: %q", len(expectedPrefix), len(data), string(data))
+	} else if string(data[:len(expectedPrefix)]) != expectedPrefix {
+		t.Errorf("Expected data to start with %q, got %q", expectedPrefix, string(data[:len(expectedPrefix)]))
 	}
 }
 
