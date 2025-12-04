@@ -3,6 +3,7 @@ package rarfs
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -712,5 +713,100 @@ func TestLazyDirectoryDiscovery(t *testing.T) {
 	// Check that the pass-through file was discovered
 	if _, ok := rfs.fileEntries["level1/level2/file.txt"]; !ok {
 		t.Error("Expected pass-through file to be discovered in level1/level2")
+	}
+}
+
+// TestConcurrentDirectoryScanning tests that multiple directories can be scanned concurrently
+func TestConcurrentDirectoryScanning(t *testing.T) {
+	testDataPath := filepath.Join("..", "..", "tests", "data")
+
+	// Check if test data exists
+	if _, err := os.Stat(testDataPath); os.IsNotExist(err) {
+		t.Skip("Test data not found, skipping")
+	}
+
+	rfs, err := NewRarFS(testDataPath)
+	if err != nil {
+		t.Fatalf("NewRarFS failed: %v", err)
+	}
+
+	// Initially, both directories should NOT be scanned
+	if rfs.scannedDirs["example-1"] {
+		t.Error("example-1 should not be scanned yet")
+	}
+	if rfs.scannedDirs["example-2"] {
+		t.Error("example-2 should not be scanned yet")
+	}
+
+	// Scan both directories concurrently
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		rfs.ensureDirScanned("example-1")
+	}()
+
+	go func() {
+		defer wg.Done()
+		rfs.ensureDirScanned("example-2")
+	}()
+
+	wg.Wait()
+
+	// Both directories should now be scanned
+	if !rfs.scannedDirs["example-1"] {
+		t.Error("example-1 should be scanned after concurrent scan")
+	}
+	if !rfs.scannedDirs["example-2"] {
+		t.Error("example-2 should be scanned after concurrent scan")
+	}
+
+	// Files from both archives should be available
+	if _, ok := rfs.fileEntries["example-1/complete"]; !ok {
+		t.Error("Expected 'example-1/complete' file from RAR archive")
+	}
+	if _, ok := rfs.fileEntries["example-2/complete"]; !ok {
+		t.Error("Expected 'example-2/complete' file from RAR archive")
+	}
+}
+
+// TestConcurrentSameDirectoryScanning tests that multiple goroutines scanning the same directory
+// doesn't cause issues
+func TestConcurrentSameDirectoryScanning(t *testing.T) {
+	testDataPath := filepath.Join("..", "..", "tests", "data")
+
+	// Check if test data exists
+	if _, err := os.Stat(testDataPath); os.IsNotExist(err) {
+		t.Skip("Test data not found, skipping")
+	}
+
+	rfs, err := NewRarFS(testDataPath)
+	if err != nil {
+		t.Fatalf("NewRarFS failed: %v", err)
+	}
+
+	// Scan the same directory from multiple goroutines concurrently
+	var wg sync.WaitGroup
+	numGoroutines := 10
+	wg.Add(numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		go func() {
+			defer wg.Done()
+			rfs.ensureDirScanned("example-1")
+		}()
+	}
+
+	wg.Wait()
+
+	// Directory should be scanned exactly once
+	if !rfs.scannedDirs["example-1"] {
+		t.Error("example-1 should be scanned after concurrent scans")
+	}
+
+	// File should be available
+	if _, ok := rfs.fileEntries["example-1/complete"]; !ok {
+		t.Error("Expected 'example-1/complete' file from RAR archive")
 	}
 }
