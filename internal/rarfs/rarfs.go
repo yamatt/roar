@@ -65,7 +65,18 @@ type RarFS struct {
 	// pathToInode maps virtual paths to stable inode numbers
 	pathToInode map[string]uint64
 
+	// scanningDirs tracks which directories are currently being scanned
+	// This prevents duplicate concurrent scans of the same directory
+	scanningDirs map[string]bool
+
+	// mu protects all the above maps
 	mu sync.RWMutex
+
+	// scanMu protects scanningDirs and scanCond
+	scanMu sync.Mutex
+
+	// scanCond is used to signal when a directory scan completes
+	scanCond *sync.Cond
 }
 
 // FileEntry represents a file within a RAR archive or a pass-through file
@@ -178,34 +189,24 @@ func findPassthroughFiles(dir string) ([]*FileEntry, error) {
 }
 
 // scanArchive scans a RAR archive and returns the list of files it contains
-// Uses OpenReader to properly handle multi-volume archives
+// Uses List() to efficiently read only archive headers without decompressing content
+// This is more efficient than using OpenReader().Next() which can access more data
 func scanArchive(archivePath string) ([]*FileEntry, error) {
-	reader, err := rardecode.OpenReader(archivePath)
+	files, err := rardecode.List(archivePath)
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		_ = reader.Close()
-	}()
 
 	var entries []*FileEntry
 
-	for {
-		header, err := reader.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-
+	for _, f := range files {
 		entry := &FileEntry{
-			Name:         header.Name,
-			Size:         header.UnPackedSize,
-			ModTime:      header.ModificationTime.Unix(),
-			IsDir:        header.IsDir,
+			Name:         f.Name,
+			Size:         f.UnPackedSize,
+			ModTime:      f.ModificationTime.Unix(),
+			IsDir:        f.IsDir,
 			ArchivePath:  archivePath,
-			InternalPath: header.Name,
+			InternalPath: f.Name,
 		}
 		entries = append(entries, entry)
 	}
@@ -224,7 +225,9 @@ func NewRarFS(sourceDir string) (*RarFS, error) {
 		pendingDirs:    make(map[string]string),
 		inodeCounter:   1, // Start at 1; 0 is reserved
 		pathToInode:    make(map[string]uint64),
+		scanningDirs:   make(map[string]bool),
 	}
+	rfs.scanCond = sync.NewCond(&rfs.scanMu)
 
 	if err := rfs.scan(); err != nil {
 		return nil, err
@@ -247,6 +250,7 @@ func (r *RarFS) scan() error {
 	r.discoveredDirs = make(map[string]bool)
 	r.pendingDirs = make(map[string]string)
 	r.pathToInode = make(map[string]uint64)
+	r.scanningDirs = make(map[string]bool)
 	r.inodeCounter = 1
 
 	logger.Info("initializing filesystem", "path", r.sourceDir)
@@ -361,7 +365,8 @@ func (r *RarFS) ensureDirDiscovered(relDir string) {
 }
 
 // ensureDirScanned ensures that the RAR archives in a directory have been scanned
-// This is called lazily when directory contents are accessed
+// This is called lazily when directory contents are accessed.
+// The implementation allows concurrent scans of different directories to improve performance.
 func (r *RarFS) ensureDirScanned(relDir string) {
 	// First ensure the directory contents have been discovered
 	r.ensureDirDiscovered(relDir)
@@ -372,35 +377,50 @@ func (r *RarFS) ensureDirScanned(relDir string) {
 		r.mu.RUnlock()
 		return
 	}
-	_, hasPending := r.pendingDirs[relDir]
+	absPath, hasPending := r.pendingDirs[relDir]
 	r.mu.RUnlock()
 
 	if !hasPending {
 		return
 	}
 
-	// Need to scan - acquire write lock
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	// Double-check after acquiring write lock
+	// Check if another goroutine is already scanning this directory
+	// Use a separate mutex to coordinate scans without blocking reads
+	r.scanMu.Lock()
+	for r.scanningDirs[relDir] {
+		// Another goroutine is scanning - wait for it to complete using condition variable
+		r.scanCond.Wait()
+	}
+	// Double-check under the main lock that it's not already scanned
+	r.mu.RLock()
 	if r.scannedDirs[relDir] {
+		r.mu.RUnlock()
+		r.scanMu.Unlock()
 		return
 	}
+	r.mu.RUnlock()
 
-	// Re-check pendingDirs under write lock
-	absPath, hasPending := r.pendingDirs[relDir]
-	if !hasPending {
-		return
-	}
+	// Mark that we're scanning this directory
+	r.scanningDirs[relDir] = true
+	r.scanMu.Unlock()
+
+	// Use defer to ensure cleanup always happens
+	defer r.cleanupScanningMarker(relDir)
 
 	logger.Debug("lazy scanning directory for RAR archives", "path", relDir)
 
-	// Find and process RAR archives
+	// Do the expensive scanning OUTSIDE the lock to allow concurrent operations
 	archives, err := findRarArchives(absPath)
 	if err != nil {
 		logger.Debug("error finding archives in directory", "path", relDir, "error", err)
 	}
+
+	// Scan all archives and collect results
+	type archiveResult struct {
+		archivePath string
+		files       []*FileEntry
+	}
+	var results []archiveResult
 
 	if len(archives) > 0 {
 		logger.Info("found RAR archives", "directory", relDir, "count", len(archives))
@@ -414,32 +434,53 @@ func (r *RarFS) ensureDirScanned(relDir string) {
 			}
 
 			logger.Debug("found files in archive", "archive", archivePath, "count", len(files))
+			results = append(results, archiveResult{archivePath: archivePath, files: files})
+		}
+	}
 
-			for _, f := range files {
-				// Virtual path: relDir/internal_path
-				virtualPath := filepath.Join(relDir, f.InternalPath)
-				f.Name = virtualPath
+	// Now acquire write lock to update the data structures
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-				if f.IsDir {
-					// Add to directories map
-					parentDir := filepath.Dir(virtualPath)
-					baseName := filepath.Base(virtualPath)
-					r.addToDirectory(parentDir, baseName)
-				} else {
-					r.fileEntries[virtualPath] = f
-					// Ensure parent directories exist in the map
-					r.ensureDirectoryPath(filepath.Dir(virtualPath))
-					// Add file to its parent directory
-					parentDir := filepath.Dir(virtualPath)
-					baseName := filepath.Base(virtualPath)
-					r.addToDirectory(parentDir, baseName)
-				}
+	// Double-check in case another goroutine completed first (shouldn't happen with current logic)
+	if r.scannedDirs[relDir] {
+		return
+	}
+
+	// Apply the results
+	for _, result := range results {
+		for _, f := range result.files {
+			// Virtual path: relDir/internal_path
+			virtualPath := filepath.Join(relDir, f.InternalPath)
+			f.Name = virtualPath
+
+			if f.IsDir {
+				// Add to directories map
+				parentDir := filepath.Dir(virtualPath)
+				baseName := filepath.Base(virtualPath)
+				r.addToDirectory(parentDir, baseName)
+			} else {
+				r.fileEntries[virtualPath] = f
+				// Ensure parent directories exist in the map
+				r.ensureDirectoryPath(filepath.Dir(virtualPath))
+				// Add file to its parent directory
+				parentDir := filepath.Dir(virtualPath)
+				baseName := filepath.Base(virtualPath)
+				r.addToDirectory(parentDir, baseName)
 			}
 		}
 	}
 
 	// Mark as scanned
 	r.scannedDirs[relDir] = true
+}
+
+// cleanupScanningMarker removes the scanning marker and signals waiting goroutines
+func (r *RarFS) cleanupScanningMarker(relDir string) {
+	r.scanMu.Lock()
+	delete(r.scanningDirs, relDir)
+	r.scanCond.Broadcast()
+	r.scanMu.Unlock()
 }
 
 // ensureDirectoryPath ensures all parent directories in a path exist in the directories map
