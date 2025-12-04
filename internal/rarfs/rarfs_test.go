@@ -42,6 +42,10 @@ func TestIsFirstRarPart(t *testing.T) {
 		{"uppercase rar", "ARCHIVE.RAR", true},
 		{"split r00", "archive.r00", false},
 		{"split r01", "archive.r01", false},
+		{"new style part1", "archive.part1.rar", true},
+		{"new style part2", "archive.part2.rar", false},
+		{"new style part10", "archive.part10.rar", false},
+		{"uppercase part1", "ARCHIVE.PART1.RAR", true},
 	}
 
 	for _, tt := range tests {
@@ -97,6 +101,53 @@ func TestFindRarArchivesNonExistent(t *testing.T) {
 	_, err := findRarArchives("/nonexistent/path")
 	if err == nil {
 		t.Error("Expected error for non-existent directory")
+	}
+}
+
+func TestFindPassthroughFiles(t *testing.T) {
+	// Create a temporary directory structure
+	tempDir := t.TempDir()
+
+	// Create test files - a mix of RAR and non-RAR files
+	rarFile := filepath.Join(tempDir, "test.rar")
+	if err := os.WriteFile(rarFile, []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	splitFile := filepath.Join(tempDir, "split.r01")
+	if err := os.WriteFile(splitFile, []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Non-RAR files that should be passed through
+	txtFile := filepath.Join(tempDir, "readme.txt")
+	if err := os.WriteFile(txtFile, []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	nfoFile := filepath.Join(tempDir, "info.nfo")
+	if err := os.WriteFile(nfoFile, []byte("info"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := findPassthroughFiles(tempDir)
+	if err != nil {
+		t.Fatalf("findPassthroughFiles failed: %v", err)
+	}
+
+	// Should find 2 pass-through files (readme.txt and info.nfo)
+	if len(files) != 2 {
+		t.Errorf("Expected 2 pass-through files, got %d", len(files))
+	}
+
+	// Check that the files are marked as pass-through
+	for _, f := range files {
+		if !f.IsPassthrough {
+			t.Errorf("Expected file %s to be marked as pass-through", f.Name)
+		}
+		if f.SourcePath == "" {
+			t.Errorf("Expected file %s to have a source path", f.Name)
+		}
 	}
 }
 
