@@ -137,10 +137,13 @@ fusermount -u /mnt/movies
 
 roar uses the FUSE (Filesystem in Userspace) interface to present a virtual filesystem. When you mount a source directory:
 
-1. roar scans all subdirectories for RAR archives
-2. It parses the archive structure to build a virtual directory tree
-3. File reads are serviced by extracting the requested portion from the archive
-4. Non-RAR files in the source directories are passed through and accessible directly
+1. roar discovers only the immediate children of the source directory (lazy loading)
+2. Subdirectories are discovered lazily when you navigate into them
+3. RAR archives are scanned only when their containing directory is accessed
+4. File reads are serviced by extracting the requested portion from the archive
+5. Non-RAR files in the source directories are passed through and accessible directly
+
+This lazy loading approach means roar starts quickly even with large directory structures containing many subdirectories.
 
 The filesystem is read-only to protect your archive data.
 
