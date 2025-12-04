@@ -81,31 +81,6 @@ Pre-built Docker images are available on GitHub Container Registry:
 docker pull ghcr.io/yamatt/roar:latest
 ```
 
-To run roar using Docker, you need to pass the FUSE device and use privileged mode:
-
-```bash
-docker run --rm -it \
-  --device /dev/fuse \
-  --cap-add SYS_ADMIN \
-  --security-opt apparmor:unconfined \
-  -v /path/to/archives:/source:ro \
-  -v /path/to/mountpoint:/mount:rshared \
-  ghcr.io/yamatt/roar:latest /source /mount
-```
-
-**Note:** Running FUSE inside Docker requires elevated privileges. The container needs:
-- Access to `/dev/fuse` device
-- `SYS_ADMIN` capability for mounting filesystems
-- AppArmor disabled (on systems using AppArmor)
-
-You can also use specific version tags:
-
-```bash
-docker pull ghcr.io/yamatt/roar:1.0.0
-docker pull ghcr.io/yamatt/roar:1.0
-docker pull ghcr.io/yamatt/roar:1
-```
-
 ## Usage
 
 ```bash
@@ -142,7 +117,7 @@ Suppose you have a directory structure like this:
 Mount it with roar:
 
 ```bash
-mkdir /mnt/archives
+mkdir /mnt/unarchived
 roar /data/archives /mnt/unarchived
 ```
 
