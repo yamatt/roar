@@ -232,7 +232,7 @@ func TestNewRarFSWithNestedSubdirectories(t *testing.T) {
 		t.Fatalf("NewRarFS failed: %v", err)
 	}
 
-	// Check that 'media' is in root
+	// Check that 'media' is in root (discovered immediately at startup)
 	found := false
 	for _, d := range rfs.directories[""] {
 		if d == "media" {
@@ -244,7 +244,10 @@ func TestNewRarFSWithNestedSubdirectories(t *testing.T) {
 		t.Error("Expected 'media' directory to be registered in root")
 	}
 
-	// Check that 'movies' is in 'media'
+	// Trigger lazy discovery of 'media' directory contents
+	rfs.ensureDirScanned("media")
+
+	// Check that 'movies' is in 'media' (after lazy discovery)
 	found = false
 	for _, d := range rfs.directories["media"] {
 		if d == "movies" {
@@ -256,7 +259,10 @@ func TestNewRarFSWithNestedSubdirectories(t *testing.T) {
 		t.Error("Expected 'movies' directory to be registered in 'media'")
 	}
 
-	// Check that 'action' is in 'media/movies'
+	// Trigger lazy discovery of 'media/movies' directory contents
+	rfs.ensureDirScanned("media/movies")
+
+	// Check that 'action' is in 'media/movies' (after lazy discovery)
 	found = false
 	for _, d := range rfs.directories["media/movies"] {
 		if d == "action" {
@@ -594,10 +600,11 @@ func TestLazyScanning(t *testing.T) {
 // TestStableInodes tests that inode numbers are stable and consistent
 func TestStableInodes(t *testing.T) {
 	rfs := &RarFS{
-		fileEntries:  make(map[string]*FileEntry),
-		directories:  make(map[string][]string),
-		pathToInode:  make(map[string]uint64),
-		inodeCounter: 1,
+		fileEntries:    make(map[string]*FileEntry),
+		directories:    make(map[string][]string),
+		discoveredDirs: make(map[string]bool),
+		pathToInode:    make(map[string]uint64),
+		inodeCounter:   1,
 	}
 
 	// Add directories and check inodes are assigned
@@ -622,5 +629,83 @@ func TestStableInodes(t *testing.T) {
 	// Verify inodes are stable (calling getInode again returns same value)
 	if rfs.getInode("dir1") != ino1 {
 		t.Error("Expected inode to be stable")
+	}
+}
+
+// TestLazyDirectoryDiscovery tests that subdirectories are only discovered when parent directories are accessed
+func TestLazyDirectoryDiscovery(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create a nested directory structure
+	level1 := filepath.Join(tempDir, "level1")
+	level2 := filepath.Join(level1, "level2")
+	level3 := filepath.Join(level2, "level3")
+	if err := os.MkdirAll(level3, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Also create a pass-through file in level2
+	passthrough := filepath.Join(level2, "file.txt")
+	if err := os.WriteFile(passthrough, []byte("test content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rfs, err := NewRarFS(tempDir)
+	if err != nil {
+		t.Fatalf("NewRarFS failed: %v", err)
+	}
+
+	// Initially, only level1 should be in root (discovered at startup)
+	if len(rfs.directories[""]) != 1 {
+		t.Errorf("Expected 1 directory in root at startup, got %d", len(rfs.directories[""]))
+	}
+	if rfs.directories[""][0] != "level1" {
+		t.Errorf("Expected 'level1' in root, got %v", rfs.directories[""])
+	}
+
+	// level2 should NOT be discovered yet
+	if len(rfs.directories["level1"]) != 0 {
+		t.Errorf("Expected 0 items in level1 before discovery, got %d", len(rfs.directories["level1"]))
+	}
+
+	// level1 should NOT be marked as discovered
+	if rfs.discoveredDirs["level1"] {
+		t.Error("level1 should not be marked as discovered yet")
+	}
+
+	// Trigger lazy discovery of level1
+	rfs.ensureDirScanned("level1")
+
+	// Now level2 should be discovered
+	if len(rfs.directories["level1"]) != 1 {
+		t.Errorf("Expected 1 item in level1 after discovery, got %d", len(rfs.directories["level1"]))
+	}
+	if rfs.directories["level1"][0] != "level2" {
+		t.Errorf("Expected 'level2' in level1, got %v", rfs.directories["level1"])
+	}
+
+	// level1 should now be marked as discovered
+	if !rfs.discoveredDirs["level1"] {
+		t.Error("level1 should be marked as discovered after ensureDirScanned")
+	}
+
+	// level3 should NOT be discovered yet (we didn't access level2)
+	if len(rfs.directories["level1/level2"]) != 0 {
+		t.Errorf("Expected 0 items in level1/level2 before discovery, got %d", len(rfs.directories["level1/level2"]))
+	}
+
+	// Trigger lazy discovery of level2
+	rfs.ensureDirScanned("level1/level2")
+
+	// Now level3 and the pass-through file should be discovered
+	expectedItems := 2 // level3 directory + file.txt
+	if len(rfs.directories["level1/level2"]) != expectedItems {
+		t.Errorf("Expected %d items in level1/level2 after discovery, got %d: %v", 
+			expectedItems, len(rfs.directories["level1/level2"]), rfs.directories["level1/level2"])
+	}
+
+	// Check that the pass-through file was discovered
+	if _, ok := rfs.fileEntries["level1/level2/file.txt"]; !ok {
+		t.Error("Expected pass-through file to be discovered in level1/level2")
 	}
 }

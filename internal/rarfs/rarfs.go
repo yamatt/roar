@@ -53,6 +53,9 @@ type RarFS struct {
 	// scannedDirs tracks which directories have had their RAR archives scanned
 	scannedDirs map[string]bool
 
+	// discoveredDirs tracks which directories have had their subdirectories discovered
+	discoveredDirs map[string]bool
+
 	// pendingDirs maps virtual paths to their absolute source paths for lazy scanning
 	pendingDirs map[string]string
 
@@ -213,13 +216,14 @@ func scanArchive(archivePath string) ([]*FileEntry, error) {
 // NewRarFS creates a new RarFS rooted at the given source directory
 func NewRarFS(sourceDir string) (*RarFS, error) {
 	rfs := &RarFS{
-		sourceDir:    sourceDir,
-		fileEntries:  make(map[string]*FileEntry),
-		directories:  make(map[string][]string),
-		scannedDirs:  make(map[string]bool),
-		pendingDirs:  make(map[string]string),
-		inodeCounter: 1, // Start at 1; 0 is reserved
-		pathToInode:  make(map[string]uint64),
+		sourceDir:      sourceDir,
+		fileEntries:    make(map[string]*FileEntry),
+		directories:    make(map[string][]string),
+		scannedDirs:    make(map[string]bool),
+		discoveredDirs: make(map[string]bool),
+		pendingDirs:    make(map[string]string),
+		inodeCounter:   1, // Start at 1; 0 is reserved
+		pathToInode:    make(map[string]uint64),
 	}
 
 	if err := rfs.scan(); err != nil {
@@ -229,9 +233,9 @@ func NewRarFS(sourceDir string) (*RarFS, error) {
 	return rfs, nil
 }
 
-// scan walks the source directory and builds the virtual filesystem structure
-// It only discovers directories and pass-through files at startup.
-// RAR archive scanning is deferred until directory contents are accessed.
+// scan initializes the filesystem by discovering only immediate children of the source directory.
+// Subdirectories and their contents are discovered lazily when accessed.
+// RAR archive scanning is also deferred until directory contents are accessed.
 func (r *RarFS) scan() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -240,81 +244,122 @@ func (r *RarFS) scan() error {
 	r.fileEntries = make(map[string]*FileEntry)
 	r.directories = make(map[string][]string)
 	r.scannedDirs = make(map[string]bool)
+	r.discoveredDirs = make(map[string]bool)
 	r.pendingDirs = make(map[string]string)
 	r.pathToInode = make(map[string]uint64)
 	r.inodeCounter = 1
 
-	logger.Info("scanning source directory structure", "path", r.sourceDir)
+	logger.Info("initializing filesystem", "path", r.sourceDir)
 
-	// Walk the source directory recursively
-	err := filepath.WalkDir(r.sourceDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			logger.Warn("error accessing path", "path", path, "error", err)
-			return nil // Continue walking despite errors
-		}
-
-		// Skip the source directory itself
-		if path == r.sourceDir {
-			return nil
-		}
-
-		// We're only interested in directories that may contain RAR files
-		if !d.IsDir() {
-			return nil
-		}
-
-		// Get the relative path from source directory
-		relDir, err := filepath.Rel(r.sourceDir, path)
-		if err != nil {
-			logger.Warn("error getting relative path", "path", path, "error", err)
-			return nil
-		}
-
-		logger.Debug("discovered directory", "path", relDir)
-
-		// Ensure the directory path exists in our structure
-		r.ensureDirectoryPath(relDir)
-
-		// Store the absolute path for lazy scanning later
-		r.pendingDirs[relDir] = path
-
-		// Find and process pass-through files immediately (they're quick to discover)
-		passthroughFiles, err := findPassthroughFiles(path)
-		if err != nil {
-			logger.Debug("error finding pass-through files in directory", "path", relDir, "error", err)
-		}
-
-		if len(passthroughFiles) > 0 {
-			logger.Debug("found pass-through files", "directory", relDir, "count", len(passthroughFiles))
-
-			for _, f := range passthroughFiles {
-				// Virtual path: relDir/filename
-				virtualPath := filepath.Join(relDir, f.Name)
-				f.Name = virtualPath
-
-				r.fileEntries[virtualPath] = f
-				// Add file to its parent directory
-				parentDir := filepath.Dir(virtualPath)
-				baseName := filepath.Base(virtualPath)
-				r.addToDirectory(parentDir, baseName)
-			}
-		}
-
-		return nil
-	})
-
-	if err != nil {
-		logger.Error("error walking source directory", "error", err)
+	// Discover immediate children of the source directory (lazy loading)
+	if err := r.discoverDirectoryContentsLocked("", r.sourceDir); err != nil {
+		logger.Error("error discovering source directory contents", "error", err)
 		return err
 	}
 
-	logger.Info("directory scan complete", "directories", len(r.directories), "pendingDirs", len(r.pendingDirs))
+	// Mark root as discovered
+	r.discoveredDirs[""] = true
+
+	logger.Info("filesystem initialized", "directories", len(r.directories[""]))
 	return nil
+}
+
+// discoverDirectoryContentsLocked discovers the immediate contents of a directory.
+// This includes subdirectories and pass-through files.
+// Must be called with the write lock held.
+func (r *RarFS) discoverDirectoryContentsLocked(relDir, absPath string) error {
+	entries, err := os.ReadDir(absPath)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			// Add subdirectory to the directory listing
+			r.addToDirectory(relDir, entry.Name())
+
+			// Store the absolute path for lazy scanning later
+			subRelPath := entry.Name()
+			if relDir != "" {
+				subRelPath = filepath.Join(relDir, entry.Name())
+			}
+			r.pendingDirs[subRelPath] = filepath.Join(absPath, entry.Name())
+
+			logger.Debug("discovered directory", "path", subRelPath)
+		} else if !isRarFile(entry.Name()) {
+			// Non-RAR file - add as pass-through
+			info, err := entry.Info()
+			if err != nil {
+				logger.Warn("error getting file info", "file", entry.Name(), "error", err)
+				continue
+			}
+
+			virtualPath := entry.Name()
+			if relDir != "" {
+				virtualPath = filepath.Join(relDir, entry.Name())
+			}
+
+			file := &FileEntry{
+				Name:          virtualPath,
+				Size:          info.Size(),
+				ModTime:       info.ModTime().Unix(),
+				IsDir:         false,
+				IsPassthrough: true,
+				SourcePath:    filepath.Join(absPath, entry.Name()),
+			}
+
+			r.fileEntries[virtualPath] = file
+			r.addToDirectory(relDir, entry.Name())
+
+			logger.Debug("discovered pass-through file", "path", virtualPath)
+		}
+	}
+
+	return nil
+}
+
+// ensureDirDiscovered ensures that the subdirectories and pass-through files of a directory have been discovered.
+// This is called lazily when directory contents are accessed.
+func (r *RarFS) ensureDirDiscovered(relDir string) {
+	// Check if already discovered (with read lock first for performance)
+	r.mu.RLock()
+	if r.discoveredDirs[relDir] {
+		r.mu.RUnlock()
+		return
+	}
+	absPath, hasPending := r.pendingDirs[relDir]
+	r.mu.RUnlock()
+
+	if !hasPending {
+		return
+	}
+
+	// Need to discover - acquire write lock
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Double-check after acquiring write lock
+	if r.discoveredDirs[relDir] {
+		return
+	}
+
+	logger.Debug("lazy discovering directory contents", "path", relDir)
+
+	// Discover subdirectories and pass-through files
+	if err := r.discoverDirectoryContentsLocked(relDir, absPath); err != nil {
+		logger.Warn("error discovering directory contents", "path", relDir, "error", err)
+	}
+
+	// Mark as discovered
+	r.discoveredDirs[relDir] = true
 }
 
 // ensureDirScanned ensures that the RAR archives in a directory have been scanned
 // This is called lazily when directory contents are accessed
 func (r *RarFS) ensureDirScanned(relDir string) {
+	// First ensure the directory contents have been discovered
+	r.ensureDirDiscovered(relDir)
+
 	// Check if already scanned (with read lock first for performance)
 	r.mu.RLock()
 	if r.scannedDirs[relDir] {
