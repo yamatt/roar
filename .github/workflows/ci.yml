@@ -53,7 +53,9 @@ jobs:
           go-version-file: 'go.mod'
 
       - name: Build binary
-        run: go build -o roar ./cmd/roar
+        run: |
+          go build -o roar ./cmd/roar
+          chmod +x roar
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4

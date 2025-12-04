@@ -34,8 +34,11 @@ roar [options] <source_directory> <mount_point>
 
 ### Options
 
-- `-f`: Run in foreground (do not daemonize)
 - `-v`, `--version`: Show version and exit
+
+### Environment Variables
+
+- `ROAR_LOG_LEVEL`: Set the log level (debug, info, warn, error). Default: info
 
 ### Example
 

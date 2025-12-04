@@ -5,6 +5,7 @@ package rarfs
 import (
 	"context"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -16,6 +17,18 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/nwaples/rardecode/v2"
 )
+
+// logger is the package-level logger for rarfs operations
+var logger = slog.Default()
+
+// maxReadSize is the maximum size for a single read operation (1MB)
+// This prevents excessive memory allocation from large read requests
+const maxReadSize = 1 << 20 // 1MB
+
+// SetLogger sets the logger for the rarfs package
+func SetLogger(l *slog.Logger) {
+	logger = l
+}
 
 // RarFS represents a FUSE filesystem for RAR archives
 type RarFS struct {
@@ -172,71 +185,123 @@ func (r *RarFS) scan() error {
 	r.fileEntries = make(map[string]*FileEntry)
 	r.directories = make(map[string][]string)
 
-	// Walk the source directory
-	entries, err := os.ReadDir(r.sourceDir)
-	if err != nil {
-		return err
-	}
+	logger.Info("scanning source directory", "path", r.sourceDir)
 
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-
-		subDir := filepath.Join(r.sourceDir, entry.Name())
-		archives, err := findRarArchives(subDir)
+	// Walk the source directory recursively
+	err := filepath.WalkDir(r.sourceDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			continue
+			logger.Warn("error accessing path", "path", path, "error", err)
+			return nil // Continue walking despite errors
 		}
 
-		// Add the subdirectory to root
-		r.directories[""] = append(r.directories[""], entry.Name())
+		// Skip the source directory itself
+		if path == r.sourceDir {
+			return nil
+		}
+
+		// We're only interested in directories that may contain RAR files
+		if !d.IsDir() {
+			return nil
+		}
+
+		// Get the relative path from source directory
+		relDir, err := filepath.Rel(r.sourceDir, path)
+		if err != nil {
+			logger.Warn("error getting relative path", "path", path, "error", err)
+			return nil
+		}
+
+		logger.Debug("scanning directory", "path", relDir)
+
+		archives, err := findRarArchives(path)
+		if err != nil {
+			logger.Debug("error finding archives in directory", "path", relDir, "error", err)
+			return nil
+		}
+
+		if len(archives) == 0 {
+			// No archives in this directory, but ensure the directory exists in our structure
+			r.ensureDirectoryPath(relDir)
+			return nil
+		}
+
+		logger.Info("found RAR archives", "directory", relDir, "count", len(archives))
+
+		// Ensure the directory path exists in our structure
+		r.ensureDirectoryPath(relDir)
 
 		for _, archivePath := range archives {
+			logger.Debug("scanning archive", "archive", archivePath)
 			files, err := scanArchive(archivePath)
 			if err != nil {
+				logger.Warn("error scanning archive", "archive", archivePath, "error", err)
 				continue
 			}
 
+			logger.Debug("found files in archive", "archive", archivePath, "count", len(files))
+
 			for _, f := range files {
-				// Virtual path: subdir/internal_path
-				virtualPath := filepath.Join(entry.Name(), f.InternalPath)
+				// Virtual path: relDir/internal_path
+				virtualPath := filepath.Join(relDir, f.InternalPath)
 				f.Name = virtualPath
 
 				if f.IsDir {
 					// Add to directories map
 					parentDir := filepath.Dir(virtualPath)
 					baseName := filepath.Base(virtualPath)
-					r.directories[parentDir] = append(r.directories[parentDir], baseName)
+					r.addToDirectory(parentDir, baseName)
 				} else {
 					r.fileEntries[virtualPath] = f
 					// Ensure parent directories exist in the map
-					parentDir := filepath.Dir(virtualPath)
-					for parentDir != "." && parentDir != "" {
-						grandParent := filepath.Dir(parentDir)
-						baseName := filepath.Base(parentDir)
-						found := false
-						for _, d := range r.directories[grandParent] {
-							if d == baseName {
-								found = true
-								break
-							}
-						}
-						if !found {
-							r.directories[grandParent] = append(r.directories[grandParent], baseName)
-						}
-						parentDir = grandParent
-					}
+					r.ensureDirectoryPath(filepath.Dir(virtualPath))
 					// Add file to its parent directory
-					parentDir = filepath.Dir(virtualPath)
+					parentDir := filepath.Dir(virtualPath)
 					baseName := filepath.Base(virtualPath)
-					r.directories[parentDir] = append(r.directories[parentDir], baseName)
+					r.addToDirectory(parentDir, baseName)
 				}
 			}
 		}
+
+		return nil
+	})
+
+	if err != nil {
+		logger.Error("error walking source directory", "error", err)
+		return err
 	}
 
+	logger.Info("scan complete", "files", len(r.fileEntries), "directories", len(r.directories))
 	return nil
+}
+
+// ensureDirectoryPath ensures all parent directories in a path exist in the directories map
+func (r *RarFS) ensureDirectoryPath(path string) {
+	if path == "" || path == "." {
+		return
+	}
+
+	parts := strings.Split(filepath.ToSlash(path), "/")
+	currentPath := ""
+
+	for i, part := range parts {
+		if i == 0 {
+			r.addToDirectory("", part)
+			currentPath = part
+		} else {
+			r.addToDirectory(currentPath, part)
+			currentPath = filepath.Join(currentPath, part)
+		}
+	}
+}
+
+// addToDirectory adds a name to a directory's listing if not already present
+func (r *RarFS) addToDirectory(dir, name string) {
+	for _, existing := range r.directories[dir] {
+		if existing == name {
+			return
+		}
+	}
+	r.directories[dir] = append(r.directories[dir], name)
 }
 
 // RarFSRoot is the root node of the FUSE filesystem
@@ -412,47 +477,39 @@ func (f *RarFSFile) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off
 	return fuse.ReadResultData(data), 0
 }
 
-// RarFileHandle handles file operations
-// Note: This implementation loads the entire file into memory on first access.
-// This is a trade-off between complexity and memory usage, suitable for moderate file sizes.
-// For very large files, consider implementing streaming reads or chunk-based caching.
+// RarFileHandle handles file operations using streaming reads
+// This implementation reads data directly from the archive on each read operation,
+// avoiding loading entire files into memory. This is suitable for large files.
 type RarFileHandle struct {
 	entry *FileEntry
-	data  []byte
 	mu    sync.Mutex
 }
 
-// ReadAt reads data at the specified offset
+// ReadAt reads data at the specified offset using streaming extraction
 func (h *RarFileHandle) ReadAt(dest []byte, off int64) ([]byte, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// Load data if not already loaded
-	if h.data == nil {
-		data, err := extractFile(h.entry.ArchivePath, h.entry.InternalPath)
-		if err != nil {
-			return nil, err
-		}
-		h.data = data
+	logger.Debug("reading file", "file", h.entry.InternalPath, "offset", off, "size", len(dest))
+
+	data, err := extractFileRange(h.entry.ArchivePath, h.entry.InternalPath, off, int64(len(dest)))
+	if err != nil {
+		logger.Warn("error reading file", "file", h.entry.InternalPath, "error", err)
+		return nil, err
 	}
 
-	if off >= int64(len(h.data)) {
-		return nil, io.EOF
-	}
-
-	end := off + int64(len(dest))
-	if end > int64(len(h.data)) {
-		end = int64(len(h.data))
-	}
-
-	n := copy(dest, h.data[off:end])
-	return dest[:n], nil
+	return data, nil
 }
 
-// extractFile extracts a file from a RAR archive
-// Note: This scans through the archive to find the file. For archives with many files,
-// this could be optimized by caching file positions or implementing an archive index.
-func extractFile(archivePath, internalPath string) ([]byte, error) {
+// extractFileRange extracts a specific range of bytes from a file in a RAR archive
+// This streams through the archive and only reads the requested portion,
+// avoiding loading the entire file into memory
+func extractFileRange(archivePath, internalPath string, offset, length int64) ([]byte, error) {
+	// Cap the read size to prevent excessive memory allocation
+	if length > maxReadSize {
+		length = maxReadSize
+	}
+
 	file, err := os.Open(archivePath)
 	if err != nil {
 		return nil, err
@@ -476,7 +533,32 @@ func extractFile(archivePath, internalPath string) ([]byte, error) {
 		}
 
 		if header.Name == internalPath {
-			return io.ReadAll(reader)
+			// Skip to the offset position
+			if offset > 0 {
+				skipped, err := io.CopyN(io.Discard, reader, offset)
+				if err != nil && err != io.EOF {
+					return nil, err
+				}
+				if skipped < offset {
+					// Offset is beyond end of file
+					return nil, io.EOF
+				}
+			}
+
+			// Read the requested length
+			result := make([]byte, length)
+			n, err := io.ReadFull(reader, result)
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				// Partial read at end of file
+				if n == 0 {
+					return nil, io.EOF
+				}
+				return result[:n], nil
+			}
+			if err != nil {
+				return nil, err
+			}
+			return result[:n], nil
 		}
 	}
 
@@ -485,8 +567,11 @@ func extractFile(archivePath, internalPath string) ([]byte, error) {
 
 // Mount mounts the RAR filesystem at the specified mount point
 func Mount(sourceDir, mountPoint string) (*fuse.Server, error) {
+	logger.Info("mounting filesystem", "source", sourceDir, "mountPoint", mountPoint)
+
 	rfs, err := NewRarFS(sourceDir)
 	if err != nil {
+		logger.Error("failed to create filesystem", "error", err)
 		return nil, err
 	}
 
@@ -503,8 +588,10 @@ func Mount(sourceDir, mountPoint string) (*fuse.Server, error) {
 
 	server, err := fs.Mount(mountPoint, root, opts)
 	if err != nil {
+		logger.Error("failed to mount filesystem", "error", err)
 		return nil, err
 	}
 
+	logger.Info("filesystem mounted successfully")
 	return server, nil
 }
