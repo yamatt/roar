@@ -126,7 +126,7 @@ func TestFindPassthroughFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	nfoFile := filepath.Join(tempDir, "info.nfo")
+	nfoFile := filepath.Join(tempDir, "info.txt")
 	if err := os.WriteFile(nfoFile, []byte("info"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestFindPassthroughFiles(t *testing.T) {
 		t.Fatalf("findPassthroughFiles failed: %v", err)
 	}
 
-	// Should find 2 pass-through files (readme.txt and info.nfo)
+	// Should find 2 pass-through files (readme.txt and info.txt)
 	if len(files) != 2 {
 		t.Errorf("Expected 2 pass-through files, got %d", len(files))
 	}
@@ -486,11 +486,11 @@ func TestNewRarFSWithTestData(t *testing.T) {
 		}
 	}
 
-	if entry, ok := rfs.fileEntries["example-2/info.nfo"]; !ok {
-		t.Error("Expected 'example-2/info.nfo' pass-through file")
+	if entry, ok := rfs.fileEntries["example-2/info.txt"]; !ok {
+		t.Error("Expected 'example-2/info.txt' pass-through file")
 	} else {
 		if !entry.IsPassthrough {
-			t.Error("Expected info.nfo to be marked as pass-through")
+			t.Error("Expected info.txt to be marked as pass-through")
 		}
 	}
 }
