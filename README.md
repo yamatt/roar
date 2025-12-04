@@ -39,7 +39,7 @@ sudo pacman -S fuse2
 
 ### Build Requirements
 
-- Go 1.21 or later
+- Go 1.25 or later
 - FUSE development headers (for building)
 
 **Debian/Ubuntu:**
@@ -71,6 +71,39 @@ go install github.com/yamatt/roar/cmd/roar@latest
 git clone https://github.com/yamatt/roar.git
 cd roar
 go build -o roar ./cmd/roar
+```
+
+### Using Docker
+
+Pre-built Docker images are available on GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/yamatt/roar:latest
+```
+
+To run roar using Docker, you need to pass the FUSE device and use privileged mode:
+
+```bash
+docker run --rm -it \
+  --device /dev/fuse \
+  --cap-add SYS_ADMIN \
+  --security-opt apparmor:unconfined \
+  -v /path/to/archives:/source:ro \
+  -v /path/to/mountpoint:/mount:rshared \
+  ghcr.io/yamatt/roar:latest /source /mount
+```
+
+**Note:** Running FUSE inside Docker requires elevated privileges. The container needs:
+- Access to `/dev/fuse` device
+- `SYS_ADMIN` capability for mounting filesystems
+- AppArmor disabled (on systems using AppArmor)
+
+You can also use specific version tags:
+
+```bash
+docker pull ghcr.io/yamatt/roar:1.0.0
+docker pull ghcr.io/yamatt/roar:1.0
+docker pull ghcr.io/yamatt/roar:1
 ```
 
 ## Usage
