@@ -21,6 +21,10 @@ import (
 // logger is the package-level logger for rarfs operations
 var logger = slog.Default()
 
+// maxReadSize is the maximum size for a single read operation (1MB)
+// This prevents excessive memory allocation from large read requests
+const maxReadSize = 1 << 20 // 1MB
+
 // SetLogger sets the logger for the rarfs package
 func SetLogger(l *slog.Logger) {
 	logger = l
@@ -501,6 +505,11 @@ func (h *RarFileHandle) ReadAt(dest []byte, off int64) ([]byte, error) {
 // This streams through the archive and only reads the requested portion,
 // avoiding loading the entire file into memory
 func extractFileRange(archivePath, internalPath string, offset, length int64) ([]byte, error) {
+	// Cap the read size to prevent excessive memory allocation
+	if length > maxReadSize {
+		length = maxReadSize
+	}
+
 	file, err := os.Open(archivePath)
 	if err != nil {
 		return nil, err
