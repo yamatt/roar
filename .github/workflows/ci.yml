@@ -1,0 +1,155 @@
+name: CI
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Git ref to checkout (branch, tag, or SHA)'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: "go.mod"
+
+      - name: Run tests
+        run: go test -v ./...
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: "go.mod"
+
+      - name: Build binary
+        run: |
+          go build -o roar ./cmd/roar
+          chmod +x roar
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: roar-binary
+          path: roar
+
+  functional-test:
+    name: Functional Test
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: "go.mod"
+
+      - name: Install FUSE
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fuse3 libfuse3-dev
+
+      - name: Download binary artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: roar-binary
+
+      - name: Make binary executable
+        run: chmod +x roar
+
+      - name: Create temporary mount directory
+        run: |
+          mkdir -p /tmp/roar-mount
+
+      - name: Mount tests/ directory
+        run: |
+          ./roar tests /tmp/roar-mount &
+          ROAR_PID=$!
+          echo $ROAR_PID > /tmp/roar.pid
+          # Give FUSE time to mount
+          sleep 2
+
+      - name: Verify example-1 complete file (.r00/.r01 format)
+        run: |
+          if [ ! -f /tmp/roar-mount/data/example-1/complete ]; then
+            echo "Error: complete file not found at /tmp/roar-mount/data/example-1/complete"
+            ls -lR /tmp/roar-mount || true
+            exit 1
+          fi
+          echo "Success: example-1 complete file found (split.r00/r01 format)"
+          cat /tmp/roar-mount/data/example-1/complete
+
+      - name: Verify example-2 complete file (.part1/.part2 format)
+        run: |
+          if [ ! -f /tmp/roar-mount/data/example-2/complete ]; then
+            echo "Error: complete file not found at /tmp/roar-mount/data/example-2/complete"
+            ls -lR /tmp/roar-mount || true
+            exit 1
+          fi
+          echo "Success: example-2 complete file found (split.part1.rar/part2.rar format)"
+          cat /tmp/roar-mount/data/example-2/complete
+
+      - name: Verify example-1 pass-through file (readme.txt)
+        run: |
+          if [ ! -f /tmp/roar-mount/data/example-1/readme.txt ]; then
+            echo "Error: readme.txt not found at /tmp/roar-mount/data/example-1/readme.txt"
+            ls -lR /tmp/roar-mount || true
+            exit 1
+          fi
+          echo "Success: example-1 readme.txt pass-through file found"
+          cat /tmp/roar-mount/data/example-1/readme.txt
+          # Verify content
+          if ! grep -q "readme" /tmp/roar-mount/data/example-1/readme.txt; then
+            echo "Error: readme.txt content does not match expected"
+            exit 1
+          fi
+
+      - name: Verify example-2 pass-through file (info.txt)
+        run: |
+          if [ ! -f /tmp/roar-mount/data/example-2/info.txt ]; then
+            echo "Error: info.txt not found at /tmp/roar-mount/data/example-2/info.txt"
+            ls -lR /tmp/roar-mount || true
+            exit 1
+          fi
+          echo "Success: example-2 info.nfo pass-through file found"
+          cat /tmp/roar-mount/data/example-2/info.txt
+          # Verify content
+          if ! grep -q "info" /tmp/roar-mount/data/example-2/info.txt; then
+            echo "Error: info.txt content does not match expected"
+            exit 1
+          fi
+
+      - name: Cleanup - Unmount filesystem
+        if: always()
+        run: |
+          if [ -f /tmp/roar.pid ]; then
+            kill $(cat /tmp/roar.pid) 2>/dev/null || true
+          fi
+          fusermount -u /tmp/roar-mount 2>/dev/null || true
