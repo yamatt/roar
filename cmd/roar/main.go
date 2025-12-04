@@ -43,9 +43,22 @@ func main() {
 	}
 
 	// Set up structured logging
+	// Log level can be set via -d flag or ROAR_LOG_LEVEL environment variable
+	// Valid values for ROAR_LOG_LEVEL: debug, info, warn, error
 	logLevel := slog.LevelInfo
 	if debug {
 		logLevel = slog.LevelDebug
+	} else if envLevel := os.Getenv("ROAR_LOG_LEVEL"); envLevel != "" {
+		switch envLevel {
+		case "debug":
+			logLevel = slog.LevelDebug
+		case "info":
+			logLevel = slog.LevelInfo
+		case "warn":
+			logLevel = slog.LevelWarn
+		case "error":
+			logLevel = slog.LevelError
+		}
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: logLevel,

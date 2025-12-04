@@ -38,6 +38,10 @@ roar [options] <source_directory> <mount_point>
 - `-d`: Enable debug logging
 - `-v`, `--version`: Show version and exit
 
+### Environment Variables
+
+- `ROAR_LOG_LEVEL`: Set the log level (debug, info, warn, error). The `-d` flag takes precedence over this variable.
+
 ### Example
 
 Suppose you have a directory structure like this:
