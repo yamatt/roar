@@ -81,14 +81,14 @@ type RarFS struct {
 
 // FileEntry represents a file within a RAR archive or a pass-through file
 type FileEntry struct {
-	Name         string
-	Size         int64
-	ModTime      int64
-	IsDir        bool
-	ArchivePath  string // Path to the .rar file (empty for pass-through files)
-	InternalPath string // Path within the archive (empty for pass-through files)
+	Name          string
+	Size          int64
+	ModTime       int64
+	IsDir         bool
+	ArchivePath   string // Path to the .rar file (empty for pass-through files)
+	InternalPath  string // Path within the archive (empty for pass-through files)
 	IsPassthrough bool   // True if this is a pass-through file (not from a RAR archive)
-	SourcePath   string // Full path to the source file (for pass-through files)
+	SourcePath    string // Full path to the source file (for pass-through files)
 }
 
 // isRarFile checks if a file is a RAR archive (including split archives)
@@ -890,8 +890,8 @@ func extractFileRange(archivePath, internalPath string, offset, length int64) ([
 }
 
 // Mount mounts the RAR filesystem at the specified mount point
-func Mount(sourceDir, mountPoint string) (*fuse.Server, error) {
-	logger.Info("mounting filesystem", "source", sourceDir, "mountPoint", mountPoint)
+func Mount(sourceDir, mountPoint string, allowOther bool) (*fuse.Server, error) {
+	logger.Info("mounting filesystem", "source", sourceDir, "mountPoint", mountPoint, "allowOther", allowOther)
 
 	rfs, err := NewRarFS(sourceDir)
 	if err != nil {
@@ -903,7 +903,7 @@ func Mount(sourceDir, mountPoint string) (*fuse.Server, error) {
 
 	opts := &fs.Options{
 		MountOptions: fuse.MountOptions{
-			AllowOther: false,
+			AllowOther: allowOther,
 			Debug:      false,
 			FsName:     "roar",
 			Name:       "roar",

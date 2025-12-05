@@ -97,6 +97,7 @@ roar [options] <source_directory> <mount_point>
 ### Options
 
 - `-v`, `--version`: Show version and exit
+- `--allow-other`: Allow other users to access the mounted filesystem (requires `user_allow_other` in `/etc/fuse.conf`)
 
 ### Environment Variables
 
@@ -147,6 +148,33 @@ To unmount:
 fusermount -u /mnt/movies
 # or press Ctrl+C if running in foreground
 ```
+
+## Running as a Service
+
+When running roar as a system service (e.g., with systemd, Horust, or similar), you'll typically need to use the `--allow-other` flag to allow users other than the service user to access the mounted filesystem.
+
+### Prerequisites
+
+First, ensure that `/etc/fuse.conf` has `user_allow_other` enabled:
+
+```bash
+sudo nano /etc/fuse.conf
+```
+
+Uncomment or add this line:
+```
+user_allow_other
+```
+
+### Example Service Configuration
+
+When starting roar as a service, include the `--allow-other` flag:
+
+```bash
+roar --allow-other /data/archives /mnt/movies
+```
+
+Without this flag, only the user running the service will be able to see the mounted filesystem contents. Other users (including when you SSH in) will see an empty directory.
 
 ## How It Works
 
