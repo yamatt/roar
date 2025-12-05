@@ -836,7 +836,9 @@ func TestFilesystemWatcher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRarFS failed: %v", err)
 	}
-	defer rfs.Close()
+	defer func() {
+		_ = rfs.Close()
+	}()
 
 	// Trigger scan to populate cache
 	rfs.ensureDirScanned("watched")
@@ -884,7 +886,9 @@ func TestInvalidateDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRarFS failed: %v", err)
 	}
-	defer rfs.Close()
+	defer func() {
+		_ = rfs.Close()
+	}()
 
 	// Scan directory to populate cache
 	rfs.ensureDirScanned("testdir")
@@ -1160,8 +1164,8 @@ func TestMountWithAllowOther(t *testing.T) {
 	}
 
 	// Clean up
-	server.Unmount()
-	rfs.Close()
+	_ = server.Unmount()
+	_ = rfs.Close()
 
 	// Test with allowOther = true
 	// Note: This may fail if user_allow_other is not set in /etc/fuse.conf
@@ -1179,8 +1183,8 @@ func TestMountWithAllowOther(t *testing.T) {
 		if rfs2 == nil {
 			t.Error("Expected rfs2 to be non-nil")
 		}
-		server2.Unmount()
-		rfs2.Close()
+		_ = server2.Unmount()
+		_ = rfs2.Close()
 	}
 }
 
