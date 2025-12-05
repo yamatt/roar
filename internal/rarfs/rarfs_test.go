@@ -936,7 +936,7 @@ func TestWatcherAddDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRarFS failed: %v", err)
 	}
-	defer rfs.Close()
+	defer func() { _ = rfs.Close() }()
 
 	// Check that the root directory is being watched
 	if !rfs.watchedDirs[tempDir] {
@@ -1045,7 +1045,7 @@ func TestHandleFileSystemEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRarFS failed: %v", err)
 	}
-	defer rfs.Close()
+	defer func() { _ = rfs.Close() }()
 
 	// Scan directory to populate cache
 	rfs.ensureDirScanned("testdir")
@@ -1097,7 +1097,7 @@ func TestWatcherWithRealRARFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRarFS failed: %v", err)
 	}
-	defer rfs.Close()
+	defer func() { _ = rfs.Close() }()
 
 	// Initially, archives directory should have no RAR files
 	rfs.ensureDirScanned("archives")
@@ -1197,7 +1197,7 @@ func TestMountOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRarFS failed: %v", err)
 	}
-	defer rfs.Close()
+	defer func() { _ = rfs.Close() }()
 
 	// Verify the filesystem was created successfully
 	if rfs.sourceDir != tempDir {
