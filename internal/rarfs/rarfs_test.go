@@ -1,10 +1,15 @@
 package rarfs
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 func TestIsRarFile(t *testing.T) {
@@ -332,7 +337,7 @@ func TestAddToDirectory(t *testing.T) {
 // TestScanArchiveOldStyle tests scanning old-style split archives (.rar, .r00, .r01)
 func TestScanArchiveOldStyle(t *testing.T) {
 	archivePath := filepath.Join("..", "..", "tests", "data", "example-1", "split.rar")
-	
+
 	// Check if test data exists
 	if _, err := os.Stat(archivePath); os.IsNotExist(err) {
 		t.Skip("Test data not found, skipping")
@@ -368,7 +373,7 @@ func TestScanArchiveOldStyle(t *testing.T) {
 // TestScanArchiveNewStyle tests scanning new-style split archives (.part1.rar, .part2.rar)
 func TestScanArchiveNewStyle(t *testing.T) {
 	archivePath := filepath.Join("..", "..", "tests", "data", "example-2", "split.part1.rar")
-	
+
 	// Check if test data exists
 	if _, err := os.Stat(archivePath); os.IsNotExist(err) {
 		t.Skip("Test data not found, skipping")
@@ -401,7 +406,7 @@ func TestScanArchiveNewStyle(t *testing.T) {
 // TestPassthroughFilesWithTestData tests pass-through functionality with actual test data
 func TestPassthroughFilesWithTestData(t *testing.T) {
 	example1Path := filepath.Join("..", "..", "tests", "data", "example-1")
-	
+
 	// Check if test data exists
 	if _, err := os.Stat(example1Path); os.IsNotExist(err) {
 		t.Skip("Test data not found, skipping")
@@ -436,7 +441,7 @@ func TestPassthroughFilesWithTestData(t *testing.T) {
 // TestNewRarFSWithTestData tests the full filesystem scan with actual test data
 func TestNewRarFSWithTestData(t *testing.T) {
 	testDataPath := filepath.Join("..", "..", "tests", "data")
-	
+
 	// Check if test data exists
 	if _, err := os.Stat(testDataPath); os.IsNotExist(err) {
 		t.Skip("Test data not found, skipping")
@@ -498,7 +503,7 @@ func TestNewRarFSWithTestData(t *testing.T) {
 // TestReadPassthroughFile tests reading content from a pass-through file
 func TestReadPassthroughFile(t *testing.T) {
 	testFilePath := filepath.Join("..", "..", "tests", "data", "example-1", "readme.txt")
-	
+
 	// Check if test data exists
 	if _, err := os.Stat(testFilePath); os.IsNotExist(err) {
 		t.Skip("Test data not found, skipping")
@@ -526,7 +531,7 @@ func TestReadPassthroughFile(t *testing.T) {
 // TestExtractFileFromArchive tests extracting content from a RAR archive
 func TestExtractFileFromArchive(t *testing.T) {
 	archivePath := filepath.Join("..", "..", "tests", "data", "example-1", "split.rar")
-	
+
 	// Check if test data exists
 	if _, err := os.Stat(archivePath); os.IsNotExist(err) {
 		t.Skip("Test data not found, skipping")
@@ -550,7 +555,7 @@ func TestExtractFileFromArchive(t *testing.T) {
 // TestLazyScanning tests that RAR archives are only scanned when directories are accessed
 func TestLazyScanning(t *testing.T) {
 	testDataPath := filepath.Join("..", "..", "tests", "data")
-	
+
 	// Check if test data exists
 	if _, err := os.Stat(testDataPath); os.IsNotExist(err) {
 		t.Skip("Test data not found, skipping")
@@ -808,5 +813,331 @@ func TestConcurrentSameDirectoryScanning(t *testing.T) {
 	// File should be available
 	if _, ok := rfs.fileEntries["example-1/complete"]; !ok {
 		t.Error("Expected 'example-1/complete' file from RAR archive")
+	}
+}
+
+// TestFilesystemWatcher tests that the filesystem watcher detects changes
+func TestFilesystemWatcher(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create initial directory structure
+	subDir := filepath.Join(tempDir, "watched")
+	if err := os.Mkdir(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create initial file
+	initialFile := filepath.Join(subDir, "initial.txt")
+	if err := os.WriteFile(initialFile, []byte("initial"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rfs, err := NewRarFS(tempDir)
+	if err != nil {
+		t.Fatalf("NewRarFS failed: %v", err)
+	}
+	defer rfs.Close()
+
+	// Trigger scan to populate cache
+	rfs.ensureDirScanned("watched")
+
+	// Verify initial file is present
+	if _, ok := rfs.fileEntries["watched/initial.txt"]; !ok {
+		t.Error("Expected initial.txt to be present")
+	}
+
+	// Add a new file to the watched directory
+	newFile := filepath.Join(subDir, "newfile.txt")
+	if err := os.WriteFile(newFile, []byte("new content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Give the watcher time to process the event
+	// Note: This is a simple approach; in production you might use channels or polling
+	time.Sleep(100 * time.Millisecond)
+
+	// The directory should be invalidated, so rescan it
+	rfs.ensureDirScanned("watched")
+
+	// Verify new file is now present
+	if _, ok := rfs.fileEntries["watched/newfile.txt"]; !ok {
+		t.Error("Expected newfile.txt to be present after filesystem change")
+	}
+}
+
+// TestInvalidateDirectory tests that invalidating a directory clears its cache
+func TestInvalidateDirectory(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create directory with a file
+	subDir := filepath.Join(tempDir, "testdir")
+	if err := os.Mkdir(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	testFile := filepath.Join(subDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rfs, err := NewRarFS(tempDir)
+	if err != nil {
+		t.Fatalf("NewRarFS failed: %v", err)
+	}
+	defer rfs.Close()
+
+	// Scan directory to populate cache
+	rfs.ensureDirScanned("testdir")
+
+	// Verify file is present
+	if _, ok := rfs.fileEntries["testdir/test.txt"]; !ok {
+		t.Error("Expected test.txt to be present before invalidation")
+	}
+
+	// Verify directory is marked as scanned
+	if !rfs.scannedDirs["testdir"] {
+		t.Error("Expected testdir to be marked as scanned")
+	}
+
+	// Invalidate the directory
+	rfs.invalidateDirectory("testdir")
+
+	// Verify cache is cleared
+	if _, ok := rfs.fileEntries["testdir/test.txt"]; ok {
+		t.Error("Expected test.txt to be removed from cache after invalidation")
+	}
+
+	// Verify directory is marked as not scanned
+	if rfs.scannedDirs["testdir"] {
+		t.Error("Expected testdir to be marked as not scanned after invalidation")
+	}
+
+	// Verify directory entries are cleared
+	if _, ok := rfs.directories["testdir"]; ok {
+		t.Error("Expected directory entries to be cleared after invalidation")
+	}
+}
+
+// TestWatcherAddDirectory tests that directories are added to the watch list
+func TestWatcherAddDirectory(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create subdirectory
+	subDir := filepath.Join(tempDir, "subdir")
+	if err := os.Mkdir(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	rfs, err := NewRarFS(tempDir)
+	if err != nil {
+		t.Fatalf("NewRarFS failed: %v", err)
+	}
+	defer rfs.Close()
+
+	// Check that the root directory is being watched
+	if !rfs.watchedDirs[tempDir] {
+		t.Error("Expected root directory to be watched")
+	}
+
+	// Trigger discovery of subdirectory
+	rfs.ensureDirScanned("subdir")
+
+	// Check that subdirectory is now being watched
+	if !rfs.watchedDirs[subDir] {
+		t.Error("Expected subdirectory to be watched after discovery")
+	}
+}
+
+// TestWatcherClose tests that closing the filesystem properly shuts down the watcher
+func TestWatcherClose(t *testing.T) {
+	tempDir := t.TempDir()
+
+	rfs, err := NewRarFS(tempDir)
+	if err != nil {
+		t.Fatalf("NewRarFS failed: %v", err)
+	}
+
+	// Close should not return an error
+	if err := rfs.Close(); err != nil {
+		t.Errorf("Close returned error: %v", err)
+	}
+
+	// Closing again should be safe (watcher is nil or already closed)
+	if err := rfs.Close(); err != nil {
+		t.Errorf("Second Close returned error: %v", err)
+	}
+}
+
+// TestInvalidateDirectoryWithNestedFiles tests that invalidating a directory
+// removes all nested files
+func TestInvalidateDirectoryWithNestedFiles(t *testing.T) {
+	rfs := &RarFS{
+		fileEntries:    make(map[string]*FileEntry),
+		directories:    make(map[string][]string),
+		scannedDirs:    make(map[string]bool),
+		discoveredDirs: make(map[string]bool),
+		pathToInode:    make(map[string]uint64),
+		inodeCounter:   1,
+	}
+
+	// Add some test entries
+	rfs.fileEntries["dir1/file1.txt"] = &FileEntry{Name: "file1.txt"}
+	rfs.fileEntries["dir1/file2.txt"] = &FileEntry{Name: "file2.txt"}
+	rfs.fileEntries["dir1/subdir/file3.txt"] = &FileEntry{Name: "file3.txt"}
+	rfs.fileEntries["dir2/file4.txt"] = &FileEntry{Name: "file4.txt"}
+	rfs.scannedDirs["dir1"] = true
+	rfs.discoveredDirs["dir1"] = true
+	rfs.directories["dir1"] = []string{"file1.txt", "file2.txt", "subdir"}
+
+	// Invalidate dir1
+	rfs.invalidateDirectory("dir1")
+
+	// Check that dir1 files are removed
+	if _, ok := rfs.fileEntries["dir1/file1.txt"]; ok {
+		t.Error("Expected dir1/file1.txt to be removed")
+	}
+	if _, ok := rfs.fileEntries["dir1/file2.txt"]; ok {
+		t.Error("Expected dir1/file2.txt to be removed")
+	}
+	if _, ok := rfs.fileEntries["dir1/subdir/file3.txt"]; ok {
+		t.Error("Expected dir1/subdir/file3.txt to be removed")
+	}
+
+	// Check that dir2 files are NOT removed
+	if _, ok := rfs.fileEntries["dir2/file4.txt"]; !ok {
+		t.Error("Expected dir2/file4.txt to still be present")
+	}
+
+	// Check that scannedDirs and discoveredDirs are cleared for dir1
+	if rfs.scannedDirs["dir1"] {
+		t.Error("Expected dir1 to be removed from scannedDirs")
+	}
+	if rfs.discoveredDirs["dir1"] {
+		t.Error("Expected dir1 to be removed from discoveredDirs")
+	}
+
+	// Check that directory listing is cleared
+	if _, ok := rfs.directories["dir1"]; ok {
+		t.Error("Expected dir1 to be removed from directories")
+	}
+}
+
+// TestHandleFileSystemEvent tests event handling logic
+func TestHandleFileSystemEvent(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create directory structure
+	subDir := filepath.Join(tempDir, "testdir")
+	if err := os.Mkdir(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	testFile := filepath.Join(subDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rfs, err := NewRarFS(tempDir)
+	if err != nil {
+		t.Fatalf("NewRarFS failed: %v", err)
+	}
+	defer rfs.Close()
+
+	// Scan directory to populate cache
+	rfs.ensureDirScanned("testdir")
+
+	// Verify directory is cached
+	if !rfs.scannedDirs["testdir"] {
+		t.Error("Expected testdir to be scanned")
+	}
+
+	// Simulate a write event in the testdir
+	event := fsnotify.Event{
+		Name: testFile,
+		Op:   fsnotify.Write,
+	}
+
+	rfs.handleFileSystemEvent(event)
+
+	// Verify the parent directory cache was invalidated
+	if rfs.scannedDirs["testdir"] {
+		t.Error("Expected testdir to be invalidated after write event")
+	}
+}
+
+// TestWatcherWithRealRARFiles tests that changes to RAR files trigger rescanning
+func TestWatcherWithRealRARFiles(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create subdirectory
+	subDir := filepath.Join(tempDir, "archives")
+	if err := os.Mkdir(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Copy a test RAR file to the watched directory
+	srcRar := filepath.Join("..", "..", "tests", "data", "example-1", "split.rar")
+	if _, err := os.Stat(srcRar); os.IsNotExist(err) {
+		t.Skip("Test data not found, skipping")
+	}
+
+	dstRar := filepath.Join(subDir, "test.rar")
+
+	// Read source RAR
+	data, err := os.ReadFile(srcRar)
+	if err != nil {
+		t.Fatalf("Failed to read source RAR: %v", err)
+	}
+
+	rfs, err := NewRarFS(tempDir)
+	if err != nil {
+		t.Fatalf("NewRarFS failed: %v", err)
+	}
+	defer rfs.Close()
+
+	// Initially, archives directory should have no RAR files
+	rfs.ensureDirScanned("archives")
+
+	initialFileCount := len(rfs.fileEntries)
+
+	// Write the RAR file
+	if err := os.WriteFile(dstRar, data, 0644); err != nil {
+		t.Fatalf("Failed to write RAR file: %v", err)
+	}
+
+	// Also copy the split parts if they exist
+	for i := 0; i < 2; i++ {
+		srcPart := filepath.Join("..", "..", "tests", "data", "example-1", fmt.Sprintf("split.r%02d", i))
+		if data, err := os.ReadFile(srcPart); err == nil {
+			dstPart := filepath.Join(subDir, fmt.Sprintf("test.r%02d", i))
+			if err := os.WriteFile(dstPart, data, 0644); err != nil {
+				t.Logf("Warning: Failed to write split part %d: %v", i, err)
+			}
+		}
+	}
+
+	// Give the watcher time to detect the change
+	time.Sleep(200 * time.Millisecond)
+
+	// Rescan the directory
+	rfs.ensureDirScanned("archives")
+
+	// After adding the RAR file, we should have more files
+	newFileCount := len(rfs.fileEntries)
+	if newFileCount <= initialFileCount {
+		t.Errorf("Expected file count to increase after adding RAR file, was %d, now %d",
+			initialFileCount, newFileCount)
+	}
+
+	// Check that files from the RAR archive are now accessible
+	foundComplete := false
+	for path := range rfs.fileEntries {
+		if strings.HasSuffix(path, "complete") {
+			foundComplete = true
+			break
+		}
+	}
+	if !foundComplete {
+		t.Error("Expected to find 'complete' file from RAR archive after filesystem change")
 	}
 }

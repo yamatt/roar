@@ -19,6 +19,7 @@ A FUSE filesystem that takes directories containing RAR archives and presents th
 - Read-only access to archive contents
 - Pass-through for non-RAR files (files that aren't RAR archives are accessible in the mounted filesystem)
 - Efficient file caching for repeated reads
+- Automatic change detection: Uses inotify to watch for changes in the source directory and automatically updates the mounted filesystem when any files or directories are added, removed, renamed, or modified
 
 ## Requirements
 
@@ -189,6 +190,26 @@ roar uses the FUSE (Filesystem in Userspace) interface to present a virtual file
 This lazy loading approach means roar starts quickly even with large directory structures containing many subdirectories.
 
 The filesystem is read-only to protect your archive data.
+
+## Testing
+
+Run the test suite:
+
+```bash
+go test ./...
+```
+
+Run tests with verbose output:
+
+```bash
+go test ./internal/rarfs -v
+```
+
+The test suite includes:
+- Unit tests for RAR file detection and archive scanning
+- Integration tests with real RAR archives (in `tests/data/`)
+- Filesystem watcher tests for inotify functionality
+- Lazy loading and concurrent access tests
 
 ## License
 

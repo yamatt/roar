@@ -13,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/nwaples/rardecode/v2"
@@ -68,6 +69,12 @@ type RarFS struct {
 	// scanningDirs tracks which directories are currently being scanned
 	// This prevents duplicate concurrent scans of the same directory
 	scanningDirs map[string]bool
+
+	// watcher monitors the source directory for changes
+	watcher *fsnotify.Watcher
+
+	// watchedDirs tracks which directories are currently being watched
+	watchedDirs map[string]bool
 
 	// mu protects all the above maps
 	mu sync.RWMutex
@@ -216,6 +223,11 @@ func scanArchive(archivePath string) ([]*FileEntry, error) {
 
 // NewRarFS creates a new RarFS rooted at the given source directory
 func NewRarFS(sourceDir string) (*RarFS, error) {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return nil, err
+	}
+
 	rfs := &RarFS{
 		sourceDir:      sourceDir,
 		fileEntries:    make(map[string]*FileEntry),
@@ -226,12 +238,18 @@ func NewRarFS(sourceDir string) (*RarFS, error) {
 		inodeCounter:   1, // Start at 1; 0 is reserved
 		pathToInode:    make(map[string]uint64),
 		scanningDirs:   make(map[string]bool),
+		watcher:        watcher,
+		watchedDirs:    make(map[string]bool),
 	}
 	rfs.scanCond = sync.NewCond(&rfs.scanMu)
 
 	if err := rfs.scan(); err != nil {
+		watcher.Close()
 		return nil, err
 	}
+
+	// Start watching the source directory
+	go rfs.watchForChanges()
 
 	return rfs, nil
 }
@@ -268,6 +286,87 @@ func (r *RarFS) scan() error {
 	return nil
 }
 
+// watchForChanges monitors the source directory for changes using inotify
+func (r *RarFS) watchForChanges() {
+	for {
+		select {
+		case event, ok := <-r.watcher.Events:
+			if !ok {
+				return
+			}
+			r.handleFileSystemEvent(event)
+		case err, ok := <-r.watcher.Errors:
+			if !ok {
+				return
+			}
+			logger.Error("filesystem watcher error", "error", err)
+		}
+	}
+}
+
+// handleFileSystemEvent processes filesystem events and invalidates caches
+func (r *RarFS) handleFileSystemEvent(event fsnotify.Event) {
+	// Determine the relative path from the source directory
+	relPath, err := filepath.Rel(r.sourceDir, event.Name)
+	if err != nil {
+		logger.Debug("error computing relative path", "path", event.Name, "error", err)
+		return
+	}
+
+	// Get the parent directory
+	parentDir := filepath.Dir(relPath)
+	if parentDir == "." {
+		parentDir = ""
+	}
+
+	logger.Debug("filesystem event", "event", event.Op.String(), "path", relPath, "parentDir", parentDir)
+
+	// For any write, create, remove, or rename event, invalidate the parent directory's cache
+	if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0 {
+		r.invalidateDirectory(parentDir)
+	}
+}
+
+// invalidateDirectory clears the cache for a directory, forcing it to be rescanned
+func (r *RarFS) invalidateDirectory(relDir string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	logger.Info("invalidating directory cache", "directory", relDir)
+
+	// Mark the directory as not scanned and not discovered
+	delete(r.scannedDirs, relDir)
+	delete(r.discoveredDirs, relDir)
+
+	// Clear directory entries
+	delete(r.directories, relDir)
+
+	// Remove file entries for this directory
+	for path := range r.fileEntries {
+		if strings.HasPrefix(path, relDir+"/") || path == relDir {
+			delete(r.fileEntries, path)
+		}
+	}
+}
+
+// addWatch adds a directory to the watch list if not already watched
+func (r *RarFS) addWatch(absPath string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.watchedDirs[absPath] {
+		return
+	}
+
+	if err := r.watcher.Add(absPath); err != nil {
+		logger.Error("failed to watch directory", "path", absPath, "error", err)
+		return
+	}
+
+	r.watchedDirs[absPath] = true
+	logger.Debug("watching directory", "path", absPath)
+}
+
 // discoverDirectoryContentsLocked discovers the immediate contents of a directory.
 // This includes subdirectories and pass-through files.
 // Must be called with the write lock held.
@@ -276,6 +375,10 @@ func (r *RarFS) discoverDirectoryContentsLocked(relDir, absPath string) error {
 	if err != nil {
 		return err
 	}
+
+	// Watch this directory for changes
+	r.watcher.Add(absPath)
+	r.watchedDirs[absPath] = true
 
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -586,6 +689,8 @@ func (r *RarFSRoot) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	r.rfs.mu.RLock()
 	defer r.rfs.mu.RUnlock()
 
+	logger.Debug("root Readdir called", "entries", len(r.rfs.directories[""]))
+
 	var entries []fuse.DirEntry
 
 	for _, name := range r.rfs.directories[""] {
@@ -595,6 +700,7 @@ func (r *RarFSRoot) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 			Mode: syscall.S_IFDIR,
 			Ino:  ino,
 		})
+		logger.Debug("adding root entry", "name", name, "ino", ino)
 	}
 
 	return fs.NewListDirStream(entries), 0
@@ -890,20 +996,22 @@ func extractFileRange(archivePath, internalPath string, offset, length int64) ([
 }
 
 // Mount mounts the RAR filesystem at the specified mount point
-func Mount(sourceDir, mountPoint string, allowOther bool) (*fuse.Server, error) {
-	logger.Info("mounting filesystem", "source", sourceDir, "mountPoint", mountPoint, "allowOther", allowOther)
+func Mount(sourceDir, mountPoint string) (*fuse.Server, *RarFS, error) {
+	logger.Info("mounting filesystem", "source", sourceDir, "mountPoint", mountPoint)
 
 	rfs, err := NewRarFS(sourceDir)
 	if err != nil {
 		logger.Error("failed to create filesystem", "error", err)
-		return nil, err
+		return nil, nil, err
 	}
+
+	logger.Debug("filesystem created", "rootDirs", len(rfs.directories[""]), "pendingDirs", len(rfs.pendingDirs))
 
 	root := &RarFSRoot{rfs: rfs}
 
 	opts := &fs.Options{
 		MountOptions: fuse.MountOptions{
-			AllowOther: allowOther,
+			AllowOther: false,
 			Debug:      false,
 			FsName:     "roar",
 			Name:       "roar",
@@ -913,9 +1021,21 @@ func Mount(sourceDir, mountPoint string, allowOther bool) (*fuse.Server, error) 
 	server, err := fs.Mount(mountPoint, root, opts)
 	if err != nil {
 		logger.Error("failed to mount filesystem", "error", err)
-		return nil, err
+		rfs.Close()
+		return nil, nil, err
 	}
 
+	// Wait a moment for the mount to be fully established
+	logger.Debug("waiting for mount to stabilize")
+
 	logger.Info("filesystem mounted successfully")
-	return server, nil
+	return server, rfs, nil
+}
+
+// Close cleans up resources used by the filesystem
+func (r *RarFS) Close() error {
+	if r.watcher != nil {
+		return r.watcher.Close()
+	}
+	return nil
 }

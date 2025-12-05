@@ -43,11 +43,9 @@ func checkFuseAvailability(logger *slog.Logger) error {
 
 func main() {
 	var showVersion bool
-	var allowOther bool
 
 	flag.BoolVar(&showVersion, "version", false, "Show version and exit")
 	flag.BoolVar(&showVersion, "v", false, "Show version and exit (shorthand)")
-	flag.BoolVar(&allowOther, "allow-other", false, "Allow other users to access the mounted filesystem (requires user_allow_other in /etc/fuse.conf)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options] <source_directory> <mount_point>\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "roar presents RAR archives in a directory as a virtual filesystem.\n")
@@ -144,7 +142,7 @@ func main() {
 
 	logger.Info("mounting filesystem", "source", sourceDir, "mountPoint", mountPoint)
 
-	server, err := rarfs.Mount(sourceDir, mountPoint, allowOther)
+	server, rfs, err := rarfs.Mount(sourceDir, mountPoint)
 	if err != nil {
 		logger.Error("failed to mount filesystem", "error", err)
 		os.Exit(1)
@@ -165,6 +163,11 @@ func main() {
 		}
 	}()
 	server.Wait()
+
+	// Clean up the watcher
+	if err := rfs.Close(); err != nil {
+		logger.Error("error closing filesystem", "error", err)
+	}
 
 	logger.Info("filesystem unmounted")
 }
