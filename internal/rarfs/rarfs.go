@@ -244,7 +244,7 @@ func NewRarFS(sourceDir string) (*RarFS, error) {
 	rfs.scanCond = sync.NewCond(&rfs.scanMu)
 
 	if err := rfs.scan(); err != nil {
-		watcher.Close()
+		_ = watcher.Close()
 		return nil, err
 	}
 
@@ -349,24 +349,6 @@ func (r *RarFS) invalidateDirectory(relDir string) {
 	}
 }
 
-// addWatch adds a directory to the watch list if not already watched
-func (r *RarFS) addWatch(absPath string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.watchedDirs[absPath] {
-		return
-	}
-
-	if err := r.watcher.Add(absPath); err != nil {
-		logger.Error("failed to watch directory", "path", absPath, "error", err)
-		return
-	}
-
-	r.watchedDirs[absPath] = true
-	logger.Debug("watching directory", "path", absPath)
-}
-
 // discoverDirectoryContentsLocked discovers the immediate contents of a directory.
 // This includes subdirectories and pass-through files.
 // Must be called with the write lock held.
@@ -377,7 +359,9 @@ func (r *RarFS) discoverDirectoryContentsLocked(relDir, absPath string) error {
 	}
 
 	// Watch this directory for changes
-	r.watcher.Add(absPath)
+	if err := r.watcher.Add(absPath); err != nil {
+		logger.Debug("failed to watch directory", "path", absPath, "error", err)
+	}
 	r.watchedDirs[absPath] = true
 
 	for _, entry := range entries {
@@ -1021,7 +1005,7 @@ func Mount(sourceDir, mountPoint string, allowOther bool) (*fuse.Server, *RarFS,
 	server, err := fs.Mount(mountPoint, root, opts)
 	if err != nil {
 		logger.Error("failed to mount filesystem", "error", err)
-		rfs.Close()
+		_ = rfs.Close()
 		return nil, nil, err
 	}
 
