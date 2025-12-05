@@ -996,8 +996,8 @@ func extractFileRange(archivePath, internalPath string, offset, length int64) ([
 }
 
 // Mount mounts the RAR filesystem at the specified mount point
-func Mount(sourceDir, mountPoint string) (*fuse.Server, *RarFS, error) {
-	logger.Info("mounting filesystem", "source", sourceDir, "mountPoint", mountPoint)
+func Mount(sourceDir, mountPoint string, allowOther bool) (*fuse.Server, *RarFS, error) {
+	logger.Info("mounting filesystem", "source", sourceDir, "mountPoint", mountPoint, "allowOther", allowOther)
 
 	rfs, err := NewRarFS(sourceDir)
 	if err != nil {
@@ -1011,7 +1011,7 @@ func Mount(sourceDir, mountPoint string) (*fuse.Server, *RarFS, error) {
 
 	opts := &fs.Options{
 		MountOptions: fuse.MountOptions{
-			AllowOther: false,
+			AllowOther: allowOther,
 			Debug:      false,
 			FsName:     "roar",
 			Name:       "roar",

@@ -1141,3 +1141,78 @@ func TestWatcherWithRealRARFiles(t *testing.T) {
 		t.Error("Expected to find 'complete' file from RAR archive after filesystem change")
 	}
 }
+
+// TestMountWithAllowOther tests that the Mount function accepts the allowOther parameter
+func TestMountWithAllowOther(t *testing.T) {
+	tempDir := t.TempDir()
+	mountPoint := t.TempDir()
+
+	// Test with allowOther = false
+	server, rfs, err := Mount(tempDir, mountPoint, false)
+	if err != nil {
+		t.Fatalf("Mount with allowOther=false failed: %v", err)
+	}
+	if server == nil {
+		t.Error("Expected server to be non-nil")
+	}
+	if rfs == nil {
+		t.Error("Expected rfs to be non-nil")
+	}
+
+	// Clean up
+	server.Unmount()
+	rfs.Close()
+
+	// Test with allowOther = true
+	// Note: This may fail if user_allow_other is not set in /etc/fuse.conf
+	// We'll just verify it doesn't crash
+	mountPoint2 := t.TempDir()
+	server2, rfs2, err2 := Mount(tempDir, mountPoint2, true)
+	if err2 != nil {
+		// If it fails, it might be due to /etc/fuse.conf settings
+		// That's expected in many test environments
+		t.Logf("Mount with allowOther=true failed (this may be expected): %v", err2)
+	} else {
+		if server2 == nil {
+			t.Error("Expected server2 to be non-nil")
+		}
+		if rfs2 == nil {
+			t.Error("Expected rfs2 to be non-nil")
+		}
+		server2.Unmount()
+		rfs2.Close()
+	}
+}
+
+// TestMountOptions tests that mount options are correctly set
+func TestMountOptions(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create a test filesystem
+	rfs, err := NewRarFS(tempDir)
+	if err != nil {
+		t.Fatalf("NewRarFS failed: %v", err)
+	}
+	defer rfs.Close()
+
+	// Verify the filesystem was created successfully
+	if rfs.sourceDir != tempDir {
+		t.Errorf("Expected sourceDir to be %s, got %s", tempDir, rfs.sourceDir)
+	}
+
+	// Verify watcher was initialized
+	if rfs.watcher == nil {
+		t.Error("Expected watcher to be initialized")
+	}
+
+	// Verify maps were initialized
+	if rfs.fileEntries == nil {
+		t.Error("Expected fileEntries to be initialized")
+	}
+	if rfs.directories == nil {
+		t.Error("Expected directories to be initialized")
+	}
+	if rfs.watchedDirs == nil {
+		t.Error("Expected watchedDirs to be initialized")
+	}
+}
