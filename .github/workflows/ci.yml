@@ -55,7 +55,9 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: [test]
+    needs:
+      - lint
+      - test
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -174,14 +176,14 @@ jobs:
           # Add a new file to the source directory
           echo "This is a dynamically added test file" > tests/data/example-1/newfile.txt
           echo "Created new file: tests/data/example-1/newfile.txt"
-          
+
           # List the mount directory to trigger rescan
           echo "Listing /tmp/roar-mount/data/example-1 to trigger rescan..."
           ls -la /tmp/roar-mount/data/example-1
-          
+
           # Give roar a moment to process the rescan
           sleep 1
-          
+
           # Verify the new file appears in the mount
           if [ ! -f /tmp/roar-mount/data/example-1/newfile.txt ]; then
             echo "Error: newfile.txt not found in mount after rescan"
@@ -189,10 +191,10 @@ jobs:
             ls -la /tmp/roar-mount/data/example-1 || true
             exit 1
           fi
-          
+
           echo "Success: New file detected after rescan"
           cat /tmp/roar-mount/data/example-1/newfile.txt
-          
+
           # Verify content
           if ! grep -q "dynamically added" /tmp/roar-mount/data/example-1/newfile.txt; then
             echo "Error: newfile.txt content does not match expected"
