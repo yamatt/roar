@@ -1220,3 +1220,348 @@ func TestMountOptions(t *testing.T) {
 		t.Error("Expected watchedDirs to be initialized")
 	}
 }
+
+// TestReaddirTriggersRescan tests that Readdir triggers a rescan of the directory
+func TestReaddirTriggersRescan(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create initial directory with a file
+	subDir := filepath.Join(tempDir, "testdir")
+	if err := os.Mkdir(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	initialFile := filepath.Join(subDir, "file1.txt")
+	if err := os.WriteFile(initialFile, []byte("test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create filesystem
+	rfs, err := NewRarFS(tempDir)
+	if err != nil {
+		t.Fatalf("NewRarFS failed: %v", err)
+	}
+	defer func() { _ = rfs.Close() }()
+
+	// Ensure the directory is discovered and scanned
+	rfs.ensureDirDiscovered("testdir")
+	rfs.ensureDirScanned("testdir")
+
+	// Verify initial file is present
+	rfs.mu.RLock()
+	initialCount := len(rfs.fileEntries)
+	hasFile1 := false
+	for path := range rfs.fileEntries {
+		if strings.Contains(path, "file1.txt") {
+			hasFile1 = true
+			break
+		}
+	}
+	rfs.mu.RUnlock()
+
+	if !hasFile1 {
+		t.Error("Expected to find file1.txt in initial scan")
+	}
+
+	// Add a new file to the directory
+	newFile := filepath.Join(subDir, "file2.txt")
+	if err := os.WriteFile(newFile, []byte("test2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Give the filesystem a moment to settle
+	time.Sleep(100 * time.Millisecond)
+
+	// Invalidate the directory (simulating what Readdir does)
+	rfs.invalidateDirectory("testdir")
+
+	// Rediscover and rescan (simulating what Readdir does)
+	rfs.ensureDirDiscovered("testdir")
+	rfs.ensureDirScanned("testdir")
+
+	// Verify the new file is now present
+	rfs.mu.RLock()
+	newCount := len(rfs.fileEntries)
+	hasFile2 := false
+	for path := range rfs.fileEntries {
+		if strings.Contains(path, "file2.txt") {
+			hasFile2 = true
+			break
+		}
+	}
+	rfs.mu.RUnlock()
+
+	if !hasFile2 {
+		t.Error("Expected to find file2.txt after rescan")
+	}
+
+	if newCount <= initialCount {
+		t.Errorf("Expected more files after rescan, got %d initially and %d after", initialCount, newCount)
+	}
+}
+
+// TestInvalidateDirectoryClearsCaches tests that invalidateDirectory properly clears all caches
+func TestInvalidateDirectoryClearsCaches(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create a subdirectory with files
+	subDir := filepath.Join(tempDir, "cachedir")
+	if err := os.Mkdir(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	testFile := filepath.Join(subDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create filesystem
+	rfs, err := NewRarFS(tempDir)
+	if err != nil {
+		t.Fatalf("NewRarFS failed: %v", err)
+	}
+	defer func() { _ = rfs.Close() }()
+
+	// Scan the directory
+	rfs.ensureDirDiscovered("cachedir")
+	rfs.ensureDirScanned("cachedir")
+
+	// Verify directory is marked as scanned and discovered
+	rfs.mu.RLock()
+	if !rfs.scannedDirs["cachedir"] {
+		t.Error("Expected cachedir to be marked as scanned")
+	}
+	if !rfs.discoveredDirs["cachedir"] {
+		t.Error("Expected cachedir to be marked as discovered")
+	}
+	hasEntries := len(rfs.fileEntries) > 0
+	rfs.mu.RUnlock()
+
+	if !hasEntries {
+		t.Error("Expected some file entries after scanning")
+	}
+
+	// Invalidate the directory
+	rfs.invalidateDirectory("cachedir")
+
+	// Verify caches are cleared
+	rfs.mu.RLock()
+	if rfs.scannedDirs["cachedir"] {
+		t.Error("Expected cachedir scanned flag to be cleared")
+	}
+	if rfs.discoveredDirs["cachedir"] {
+		t.Error("Expected cachedir discovered flag to be cleared")
+	}
+
+	// Check that file entries for this directory are removed
+	hasCachedirEntries := false
+	for path := range rfs.fileEntries {
+		if strings.HasPrefix(path, "cachedir/") {
+			hasCachedirEntries = true
+			break
+		}
+	}
+	rfs.mu.RUnlock()
+
+	if hasCachedirEntries {
+		t.Error("Expected cachedir file entries to be cleared after invalidation")
+	}
+}
+
+// TestReaddirPicksUpNewFiles tests that repeated Readdir operations pick up new files
+func TestReaddirPicksUpNewFiles(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create a subdirectory
+	subDir := filepath.Join(tempDir, "dynamic")
+	if err := os.Mkdir(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create filesystem
+	rfs, err := NewRarFS(tempDir)
+	if err != nil {
+		t.Fatalf("NewRarFS failed: %v", err)
+	}
+	defer func() { _ = rfs.Close() }()
+
+	// Initial scan
+	rfs.ensureDirDiscovered("dynamic")
+	rfs.ensureDirScanned("dynamic")
+
+	rfs.mu.RLock()
+	initialCount := len(rfs.fileEntries)
+	rfs.mu.RUnlock()
+
+	// Add a new file
+	newFile := filepath.Join(subDir, "new.txt")
+	if err := os.WriteFile(newFile, []byte("new content"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait a bit for filesystem to settle
+	time.Sleep(50 * time.Millisecond)
+
+	// Invalidate and rescan (simulating Readdir)
+	rfs.invalidateDirectory("dynamic")
+	rfs.ensureDirDiscovered("dynamic")
+	rfs.ensureDirScanned("dynamic")
+
+	rfs.mu.RLock()
+	finalCount := len(rfs.fileEntries)
+	hasNewFile := false
+	for path := range rfs.fileEntries {
+		if strings.Contains(path, "new.txt") {
+			hasNewFile = true
+			break
+		}
+	}
+	rfs.mu.RUnlock()
+
+	if !hasNewFile {
+		t.Error("Expected to find new.txt after rescan")
+	}
+
+	if finalCount <= initialCount {
+		t.Errorf("Expected more files after adding new.txt: initial=%d, final=%d", initialCount, finalCount)
+	}
+}
+
+// TestInvalidateDirectoryRestoresPendingDirs tests that invalidateDirectory
+// properly restores pendingDirs entries so directories can be rediscovered
+func TestInvalidateDirectoryRestoresPendingDirs(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create a subdirectory with a file
+	subDir := filepath.Join(tempDir, "testdir")
+	if err := os.Mkdir(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	testFile := filepath.Join(subDir, "initial.txt")
+	if err := os.WriteFile(testFile, []byte("initial"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create filesystem
+	rfs, err := NewRarFS(tempDir)
+	if err != nil {
+		t.Fatalf("NewRarFS failed: %v", err)
+	}
+	defer func() { _ = rfs.Close() }()
+
+	// Initial scan
+	rfs.ensureDirDiscovered("testdir")
+	rfs.ensureDirScanned("testdir")
+
+	// Verify initial state
+	rfs.mu.RLock()
+	if !rfs.discoveredDirs["testdir"] {
+		t.Error("Expected testdir to be marked as discovered")
+	}
+	rfs.mu.RUnlock()
+
+	// Invalidate the directory
+	rfs.invalidateDirectory("testdir")
+
+	// Verify cache is cleared but pendingDirs is restored
+	rfs.mu.RLock()
+	if rfs.discoveredDirs["testdir"] {
+		t.Error("Expected testdir discovered flag to be cleared")
+	}
+	restoredPath := rfs.pendingDirs["testdir"]
+	rfs.mu.RUnlock()
+
+	if restoredPath == "" {
+		t.Error("Expected pendingDirs entry to be restored after invalidation")
+	}
+
+	expectedPath := filepath.Join(tempDir, "testdir")
+	if restoredPath != expectedPath {
+		t.Errorf("Expected pendingDirs path to be %s, got %s", expectedPath, restoredPath)
+	}
+
+	// Now try to rediscover - should work because pendingDirs was restored
+	rfs.ensureDirDiscovered("testdir")
+
+	rfs.mu.RLock()
+	rediscovered := rfs.discoveredDirs["testdir"]
+	rfs.mu.RUnlock()
+
+	if !rediscovered {
+		t.Error("Expected testdir to be rediscovered after invalidation")
+	}
+}
+
+// TestInvalidateRootDirectoryRestoresPendingDirs tests that invalidating
+// the root directory properly restores its pendingDirs entry
+func TestInvalidateRootDirectoryRestoresPendingDirs(t *testing.T) {
+	tempDir := t.TempDir()
+
+	// Create a subdirectory in root
+	subDir := filepath.Join(tempDir, "rootsub")
+	if err := os.Mkdir(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create filesystem
+	rfs, err := NewRarFS(tempDir)
+	if err != nil {
+		t.Fatalf("NewRarFS failed: %v", err)
+	}
+	defer func() { _ = rfs.Close() }()
+
+	// Verify root is discovered initially
+	rfs.mu.RLock()
+	if !rfs.discoveredDirs[""] {
+		t.Error("Expected root to be marked as discovered")
+	}
+	initialDirCount := len(rfs.directories[""])
+	rfs.mu.RUnlock()
+
+	if initialDirCount == 0 {
+		t.Error("Expected root to have at least one subdirectory")
+	}
+
+	// Invalidate root directory
+	rfs.invalidateDirectory("")
+
+	// Verify cache is cleared
+	rfs.mu.RLock()
+	if rfs.discoveredDirs[""] {
+		t.Error("Expected root discovered flag to be cleared")
+	}
+	if len(rfs.directories[""]) != 0 {
+		t.Error("Expected root directory entries to be cleared")
+	}
+	restoredPath := rfs.pendingDirs[""]
+	rfs.mu.RUnlock()
+
+	if restoredPath == "" {
+		t.Error("Expected root pendingDirs entry to be restored after invalidation")
+	}
+
+	if restoredPath != tempDir {
+		t.Errorf("Expected root pendingDirs path to be %s, got %s", tempDir, restoredPath)
+	}
+
+	// Rediscover root - should work because pendingDirs was restored
+	rfs.ensureDirDiscovered("")
+
+	rfs.mu.RLock()
+	rediscovered := rfs.discoveredDirs[""]
+	newDirCount := len(rfs.directories[""])
+	rfs.mu.RUnlock()
+
+	if !rediscovered {
+		t.Error("Expected root to be rediscovered after invalidation")
+	}
+
+	if newDirCount == 0 {
+		t.Error("Expected root to have subdirectories after rediscovery")
+	}
+
+	if newDirCount != initialDirCount {
+		t.Errorf("Expected same directory count after rediscovery: initial=%d, new=%d", initialDirCount, newDirCount)
+	}
+}

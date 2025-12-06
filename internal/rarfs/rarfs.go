@@ -347,6 +347,18 @@ func (r *RarFS) invalidateDirectory(relDir string) {
 			delete(r.fileEntries, path)
 		}
 	}
+
+	// Restore pendingDirs entry so the directory can be rediscovered
+	// This ensures the directory can be rescanned after invalidation
+	if r.pendingDirs != nil {
+		if relDir == "" {
+			// Root directory
+			r.pendingDirs[""] = r.sourceDir
+		} else {
+			// For subdirectories, reconstruct the absolute path
+			r.pendingDirs[relDir] = filepath.Join(r.sourceDir, relDir)
+		}
+	}
 }
 
 // discoverDirectoryContentsLocked discovers the immediate contents of a directory.
@@ -670,10 +682,15 @@ func (r *RarFSRoot) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.Att
 
 // Readdir lists the contents of the root directory
 func (r *RarFSRoot) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	// Trigger rescan of root directory on every Readdir
+	logger.Debug("root Readdir called - triggering rescan")
+	r.rfs.invalidateDirectory("")
+	r.rfs.ensureDirDiscovered("")
+
 	r.rfs.mu.RLock()
 	defer r.rfs.mu.RUnlock()
 
-	logger.Debug("root Readdir called", "entries", len(r.rfs.directories[""]))
+	logger.Debug("root Readdir entries", "entries", len(r.rfs.directories[""]))
 
 	var entries []fuse.DirEntry
 
@@ -743,6 +760,10 @@ func (d *RarFSDir) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.Attr
 
 // Readdir lists the contents of a directory
 func (d *RarFSDir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	// Trigger rescan on every Readdir to pick up new files
+	logger.Debug("dir Readdir called - triggering rescan", "path", d.path)
+	d.rfs.invalidateDirectory(d.path)
+
 	// Ensure RAR archives in this directory have been scanned (lazy loading)
 	d.rfs.ensureDirScanned(d.path)
 
