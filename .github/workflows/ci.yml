@@ -4,15 +4,37 @@ on:
   workflow_call:
     inputs:
       ref:
-        description: 'Git ref to checkout (branch, tag, or SHA)'
+        description: "Git ref to checkout (branch, tag, or SHA)"
         required: false
         type: string
-        default: ''
+        default: ""
 
 permissions:
   contents: read
 
 jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: "go.mod"
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+      - name: Check formatting
+        run: |
+          gofmt -l .
+
+      - name: Run go vet
+        run: go vet ./...
   test:
     name: Test
     runs-on: ubuntu-latest

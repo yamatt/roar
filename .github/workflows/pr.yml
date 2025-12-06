@@ -19,24 +19,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint:
-    name: Lint
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v6
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: "go.mod"
-
-      - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v9
-
   ci:
     name: CI
     # Run CI immediately for PRs from the same repo, or when approved for fork PRs
