@@ -38,7 +38,7 @@ jobs:
           go build -ldflags="-s -w -X main.version=${VERSION}" -o roar-${{ matrix.goos }}-${{ matrix.goarch }} ./cmd/roar
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: roar-${{ matrix.goos }}-${{ matrix.goarch }}
           path: roar-${{ matrix.goos }}-${{ matrix.goarch }}
