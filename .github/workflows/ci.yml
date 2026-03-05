@@ -75,7 +75,7 @@ jobs:
           chmod +x roar
 
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: roar-binary
           path: roar
