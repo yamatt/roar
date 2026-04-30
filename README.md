@@ -47,7 +47,7 @@ sudo pacman -S fuse2
 
 ### Build Requirements
 
-- Go 1.25 or later
+- Go 1.26 or later
 - FUSE development headers (for building)
 
 **Debian/Ubuntu:**
