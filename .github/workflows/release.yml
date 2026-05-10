@@ -69,23 +69,15 @@ jobs:
         with:
           path: artifacts
 
-      - name: Prepare release assets
+      - name: Create Release with Generated Notes
         run: |
-          mkdir -p release
-          for dir in artifacts/*/; do
-            binary_name=$(basename "$dir")
-            cp "${dir}${binary_name}" "release/${binary_name}"
-            chmod +x "release/${binary_name}"
-          done
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v3
-        with:
-          name: ${{ steps.tag_info.outputs.tag_message }}
-          generate_release_notes: true
-          files: release/*
+          chmod +x artifacts/*/*
+          gh release create "${{ github.ref_name }}" \
+            --title="${{ steps.tag_info.outputs.tag_message }}" \
+            --generate-release-notes \
+            artifacts/*/*
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   docker:
     name: Build and Push Docker Image
