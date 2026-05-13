@@ -62,10 +62,17 @@ jobs:
         run: go test -v ./...
 
 
-  functional-test:
-    name: Functional Test
+  functional-test-scenarios:
+    name: Functional Test Scenarios
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      matrix:
+        test-name:
+          - part1-split
+          - pass-through
+          - r00-split
+          - zip
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -80,109 +87,52 @@ jobs:
           go build -o roar ./cmd/roar
           chmod +x roar
 
-      - name: Install FUSE
+      - name: Install needed dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y fuse3 libfuse3-dev
+          sudo apt-get install --no-install-recommends -y fuse3 libfuse3-dev tree
 
-      - name: Create temporary mount directory
+      - name: Mount ${{ matrix.test-name }}
         run: |
-          mkdir -p /tmp/roar-mount
+          mkdir -p ${{ runner.temp }}/roar-mount/test
+          ./roar tests/data/functional-tests/examples/${{ matrix.test-name }} ${{ runner.temp }}/roar-mount/test &
 
-      - name: Mount tests/ directory
+      - name: Verify test ${{ matrix.test-name }} matches expected output
         run: |
-          ./roar tests /tmp/roar-mount &
-          ROAR_PID=$!
-          echo $ROAR_PID > /tmp/roar.pid
-          # Give FUSE time to mount
-          sleep 2
+          tree ${{ runner.temp }}/roar-mount/test > ${{ runner.temp }}/roar-mount-test-output.txt
+          diff tests/data/functional-tests/results/${{ matrix.test-name }}
 
-      - name: Verify example-1 complete file (.r00/.r01 format)
+  functional-test-rescan:
+    name: Functional Test Scenarios
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: "go.mod"
+
+      - name: Build binary
         run: |
-          if [ ! -f /tmp/roar-mount/data/example-1/complete ]; then
-            echo "Error: complete file not found at /tmp/roar-mount/data/example-1/complete"
-            ls -lR /tmp/roar-mount || true
-            exit 1
-          fi
-          echo "Success: example-1 complete file found (split.r00/r01 format)"
-          cat /tmp/roar-mount/data/example-1/complete
+          go build -o roar ./cmd/roar
+          chmod +x roar
 
-      - name: Verify example-2 complete file (.part1/.part2 format)
+      - name: Install needed dependencies
         run: |
-          if [ ! -f /tmp/roar-mount/data/example-2/complete ]; then
-            echo "Error: complete file not found at /tmp/roar-mount/data/example-2/complete"
-            ls -lR /tmp/roar-mount || true
-            exit 1
-          fi
-          echo "Success: example-2 complete file found (split.part1.rar/part2.rar format)"
-          cat /tmp/roar-mount/data/example-2/complete
-
-      - name: Verify example-1 pass-through file (readme.txt)
-        run: |
-          if [ ! -f /tmp/roar-mount/data/example-1/readme.txt ]; then
-            echo "Error: readme.txt not found at /tmp/roar-mount/data/example-1/readme.txt"
-            ls -lR /tmp/roar-mount || true
-            exit 1
-          fi
-          echo "Success: example-1 readme.txt pass-through file found"
-          cat /tmp/roar-mount/data/example-1/readme.txt
-          # Verify content
-          if ! grep -q "readme" /tmp/roar-mount/data/example-1/readme.txt; then
-            echo "Error: readme.txt content does not match expected"
-            exit 1
-          fi
-
-      - name: Verify example-2 pass-through file (info.txt)
-        run: |
-          if [ ! -f /tmp/roar-mount/data/example-2/info.txt ]; then
-            echo "Error: info.txt not found at /tmp/roar-mount/data/example-2/info.txt"
-            ls -lR /tmp/roar-mount || true
-            exit 1
-          fi
-          echo "Success: example-2 info.nfo pass-through file found"
-          cat /tmp/roar-mount/data/example-2/info.txt
-          # Verify content
-          if ! grep -q "info" /tmp/roar-mount/data/example-2/info.txt; then
-            echo "Error: info.txt content does not match expected"
-            exit 1
-          fi
-
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y fuse3 libfuse3-dev tree
       - name: Test rescan - Add new file to source
         run: |
-          echo "Testing dynamic file detection (rescan on ls)"
-          # Add a new file to the source directory
-          echo "This is a dynamically added test file" > tests/data/example-1/newfile.txt
-          echo "Created new file: tests/data/example-1/newfile.txt"
+          mkdir -p ${{ runner.temp }}/roar-mount/test
+          ./roar tests/data/functional-tests/examples/part1-split ${{ runner.temp }}/roar-mount/test &
 
-          # List the mount directory to trigger rescan
-          echo "Listing /tmp/roar-mount/data/example-1 to trigger rescan..."
-          ls -la /tmp/roar-mount/data/example-1
+          touch ${{ runner.temp }}/roar-mount/test/new-file.txt
 
-          # Give roar a moment to process the rescan
-          sleep 1
-
-          # Verify the new file appears in the mount
-          if [ ! -f /tmp/roar-mount/data/example-1/newfile.txt ]; then
-            echo "Error: newfile.txt not found in mount after rescan"
-            echo "Contents of /tmp/roar-mount/data/example-1:"
-            ls -la /tmp/roar-mount/data/example-1 || true
-            exit 1
+          if [ -f ${{ runner.temp }}/roar-mount/test/new-file.txt ]; then
+            exit 0
+          else
+            echo 1
           fi
-
-          echo "Success: New file detected after rescan"
-          cat /tmp/roar-mount/data/example-1/newfile.txt
-
-          # Verify content
-          if ! grep -q "dynamically added" /tmp/roar-mount/data/example-1/newfile.txt; then
-            echo "Error: newfile.txt content does not match expected"
-            exit 1
-          fi
-          echo "Success: New file content verified"
-
-      - name: Cleanup - Unmount filesystem
-        if: always()
-        run: |
-          if [ -f /tmp/roar.pid ]; then
-            kill $(cat /tmp/roar.pid) 2>/dev/null || true
-          fi
-          fusermount -u /tmp/roar-mount 2>/dev/null || true
