@@ -100,7 +100,7 @@ jobs:
       - name: Verify test ${{ matrix.test-name }} matches expected output
         run: |
           tree ${{ runner.temp }}/roar-mount/test > ${{ runner.temp }}/roar-mount-test-output.txt
-          diff tests/data/functional-tests/results/${{ matrix.test-name }}
+          diff tests/data/functional-tests/results/${{ matrix.test-name }} ${{ runner.temp }}/roar-mount-test-output.txt
 
   functional-test-rescan:
     name: Functional Test Scenarios
