@@ -1,6 +1,7 @@
 package rarfs
 
 import (
+	"archive/zip"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -110,11 +111,102 @@ func TestFindRarArchivesNonExistent(t *testing.T) {
 	}
 }
 
+func TestIsZipFile(t *testing.T) {
+	tests := []struct {
+		name     string
+		filename string
+		want     bool
+	}{
+		{"standard zip", "archive.zip", true},
+		{"uppercase zip", "ARCHIVE.ZIP", true},
+		{"mixed case zip", "Archive.Zip", true},
+		{"not zip - rar", "archive.rar", false},
+		{"not zip - tar", "archive.tar", false},
+		{"not zip - partial match", "ziparchive.txt", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isZipFile(tt.filename); got != tt.want {
+				t.Errorf("isZipFile(%q) = %v, want %v", tt.filename, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFindZipArchives(t *testing.T) {
+	// Create a temporary directory structure
+	tempDir := t.TempDir()
+
+	zipFile := filepath.Join(tempDir, "test.zip")
+	if err := os.WriteFile(zipFile, []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rarFile := filepath.Join(tempDir, "test.rar")
+	if err := os.WriteFile(rarFile, []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	archives, err := findZipArchives(tempDir)
+	if err != nil {
+		t.Fatalf("findZipArchives failed: %v", err)
+	}
+
+	if len(archives) != 1 || filepath.Base(archives[0]) != "test.zip" {
+		t.Fatalf("Expected only test.zip, got %v", archives)
+	}
+}
+
+func TestScanZipArchive(t *testing.T) {
+	archivePath := filepath.Join(t.TempDir(), "sample.zip")
+	f, err := os.Create(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w := zip.NewWriter(f)
+	fileWriter, err := w.Create("hello.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fileWriter.Write([]byte("world")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := scanZipArchive(archivePath)
+	if err != nil {
+		t.Fatalf("scanZipArchive failed: %v", err)
+	}
+
+	found := false
+	for _, entry := range entries {
+		if entry.Name == "hello.txt" {
+			found = true
+			if entry.Size != 5 {
+				t.Errorf("Expected file size 5, got %d", entry.Size)
+			}
+			if entry.ArchivePath != archivePath {
+				t.Errorf("Expected ArchivePath %q, got %q", archivePath, entry.ArchivePath)
+			}
+		}
+	}
+	if !found {
+		t.Error("Expected to find hello.txt in ZIP archive")
+	}
+}
+
 func TestFindPassthroughFiles(t *testing.T) {
 	// Create a temporary directory structure
 	tempDir := t.TempDir()
 
-	// Create test files - a mix of RAR and non-RAR files
+	// Create test files - a mix of archive and non-archive files
 	rarFile := filepath.Join(tempDir, "test.rar")
 	if err := os.WriteFile(rarFile, []byte{}, 0644); err != nil {
 		t.Fatal(err)
@@ -125,7 +217,12 @@ func TestFindPassthroughFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Non-RAR files that should be passed through
+	zipFile := filepath.Join(tempDir, "archive.zip")
+	if err := os.WriteFile(zipFile, []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Non-archive files that should be passed through
 	txtFile := filepath.Join(tempDir, "readme.txt")
 	if err := os.WriteFile(txtFile, []byte("hello"), 0644); err != nil {
 		t.Fatal(err)

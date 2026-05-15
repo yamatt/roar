@@ -3,6 +3,7 @@
 package rarfs
 
 import (
+	"archive/zip"
 	"context"
 	"io"
 	"log/slog"
@@ -109,6 +110,12 @@ func isRarFile(name string) bool {
 	return matched
 }
 
+// isZipFile checks if a file is a ZIP archive
+func isZipFile(name string) bool {
+	lower := strings.ToLower(name)
+	return strings.HasSuffix(lower, ".zip")
+}
+
 // isFirstRarPart checks if a file is the first part of a RAR archive
 // For new-style .partN.rar naming, only .part1.rar is the first part
 // For old-style naming, the .rar file (without .partN) is the first part
@@ -156,7 +163,29 @@ func findRarArchives(dir string) ([]string, error) {
 	return archives, nil
 }
 
-// findPassthroughFiles finds all non-RAR files in the given directory
+// findZipArchives finds all ZIP archives in the given directory
+func findZipArchives(dir string) ([]string, error) {
+	var archives []string
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	// Find all ZIP files
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if isZipFile(entry.Name()) {
+			archives = append(archives, filepath.Join(dir, entry.Name()))
+		}
+	}
+
+	return archives, nil
+}
+
+// findPassthroughFiles finds all non-archive files in the given directory
 // These files will be passed through to the virtual filesystem
 func findPassthroughFiles(dir string) ([]*FileEntry, error) {
 	var files []*FileEntry
@@ -170,8 +199,8 @@ func findPassthroughFiles(dir string) ([]*FileEntry, error) {
 		if entry.IsDir() {
 			continue
 		}
-		// Skip RAR files (including split archives)
-		if isRarFile(entry.Name()) {
+		// Skip archive files (RAR and ZIP)
+		if isRarFile(entry.Name()) || isZipFile(entry.Name()) {
 			continue
 		}
 
@@ -212,6 +241,31 @@ func scanArchive(archivePath string) ([]*FileEntry, error) {
 			Size:         f.UnPackedSize,
 			ModTime:      f.ModificationTime.Unix(),
 			IsDir:        f.IsDir,
+			ArchivePath:  archivePath,
+			InternalPath: f.Name,
+		}
+		entries = append(entries, entry)
+	}
+
+	return entries, nil
+}
+
+// scanZipArchive scans a ZIP archive and returns its file entries
+func scanZipArchive(archivePath string) ([]*FileEntry, error) {
+	r, err := zip.OpenReader(archivePath)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+
+	var entries []*FileEntry
+
+	for _, f := range r.File {
+		entry := &FileEntry{
+			Name:         f.Name,
+			Size:         int64(f.UncompressedSize64),
+			ModTime:      f.Modified.Unix(),
+			IsDir:        f.FileInfo().IsDir(),
 			ArchivePath:  archivePath,
 			InternalPath: f.Name,
 		}
@@ -389,8 +443,8 @@ func (r *RarFS) discoverDirectoryContentsLocked(relDir, absPath string) error {
 			r.pendingDirs[subRelPath] = filepath.Join(absPath, entry.Name())
 
 			logger.Debug("discovered directory", "path", subRelPath)
-		} else if !isRarFile(entry.Name()) {
-			// Non-RAR file - add as pass-through
+		} else if !isRarFile(entry.Name()) && !isZipFile(entry.Name()) {
+			// Non-archive file - add as pass-through
 			info, err := entry.Info()
 			if err != nil {
 				logger.Warn("error getting file info", "file", entry.Name(), "error", err)
@@ -463,7 +517,7 @@ func (r *RarFS) ensureDirDiscovered(relDir string) {
 	r.discoveredDirs[relDir] = true
 }
 
-// ensureDirScanned ensures that the RAR archives in a directory have been scanned
+// ensureDirScanned ensures that the RAR and ZIP archives in a directory have been scanned
 // This is called lazily when directory contents are accessed.
 // The implementation allows concurrent scans of different directories to improve performance.
 func (r *RarFS) ensureDirScanned(relDir string) {
@@ -506,12 +560,17 @@ func (r *RarFS) ensureDirScanned(relDir string) {
 	// Use defer to ensure cleanup always happens
 	defer r.cleanupScanningMarker(relDir)
 
-	logger.Debug("lazy scanning directory for RAR archives", "path", relDir)
+	logger.Debug("lazy scanning directory for archives", "path", relDir)
 
 	// Do the expensive scanning OUTSIDE the lock to allow concurrent operations
-	archives, err := findRarArchives(absPath)
+	rarArchives, err := findRarArchives(absPath)
 	if err != nil {
-		logger.Debug("error finding archives in directory", "path", relDir, "error", err)
+		logger.Debug("error finding RAR archives in directory", "path", relDir, "error", err)
+	}
+
+	zipArchives, err := findZipArchives(absPath)
+	if err != nil {
+		logger.Debug("error finding ZIP archives in directory", "path", relDir, "error", err)
 	}
 
 	// Scan all archives and collect results
@@ -521,18 +580,34 @@ func (r *RarFS) ensureDirScanned(relDir string) {
 	}
 	var results []archiveResult
 
-	if len(archives) > 0 {
-		logger.Info("found RAR archives", "directory", relDir, "count", len(archives))
+	if len(rarArchives) > 0 {
+		logger.Info("found RAR archives", "directory", relDir, "count", len(rarArchives))
 
-		for _, archivePath := range archives {
-			logger.Debug("scanning archive", "archive", archivePath)
+		for _, archivePath := range rarArchives {
+			logger.Debug("scanning RAR archive", "archive", archivePath)
 			files, err := scanArchive(archivePath)
 			if err != nil {
-				logger.Warn("error scanning archive", "archive", archivePath, "error", err)
+				logger.Warn("error scanning RAR archive", "archive", archivePath, "error", err)
 				continue
 			}
 
-			logger.Debug("found files in archive", "archive", archivePath, "count", len(files))
+			logger.Debug("found files in RAR archive", "archive", archivePath, "count", len(files))
+			results = append(results, archiveResult{archivePath: archivePath, files: files})
+		}
+	}
+
+	if len(zipArchives) > 0 {
+		logger.Info("found ZIP archives", "directory", relDir, "count", len(zipArchives))
+
+		for _, archivePath := range zipArchives {
+			logger.Debug("scanning ZIP archive", "archive", archivePath)
+			files, err := scanZipArchive(archivePath)
+			if err != nil {
+				logger.Warn("error scanning ZIP archive", "archive", archivePath, "error", err)
+				continue
+			}
+
+			logger.Debug("found files in ZIP archive", "archive", archivePath, "count", len(files))
 			results = append(results, archiveResult{archivePath: archivePath, files: files})
 		}
 	}

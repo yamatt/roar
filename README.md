@@ -7,17 +7,17 @@
 [![Release](https://img.shields.io/github/v/release/yamatt/roar)](https://github.com/yamatt/roar/releases/latest)
 [![Docker Image](https://img.shields.io/badge/Docker-ghcr.io%2Fyamatt%2Froar-blue?logo=docker)](https://ghcr.io/yamatt/roar)
 
-A FUSE filesystem that takes directories containing RAR archives and presents the files within those archives as if there were no RAR files.
+A FUSE filesystem that takes directories containing RAR and ZIP archives and presents the files within those archives as if there were no archive files.
 
 ## Features
 
-- Present RAR archive contents as a transparent virtual filesystem
+- Present RAR and ZIP archive contents as a transparent virtual filesystem
 - Support for split RAR archives:
   - New style: `.part1.rar`, `.part2.rar`, etc.
   - Old style: `.rar`, `.r00`, `.r01`, etc.
-- Support for RAR5 format
+- Support for RAR5 format and standard ZIP archives
 - Read-only access to archive contents
-- Pass-through for non-RAR files (files that aren't RAR archives are accessible in the mounted filesystem)
+- Pass-through for non-archive files (files that aren't RAR or ZIP archives are accessible in the mounted filesystem)
 - Efficient file caching for repeated reads
 - Automatic change detection: Uses inotify to watch for changes in the source directory and automatically updates the mounted filesystem when any files or directories are added, removed, renamed, or modified
 
@@ -118,9 +118,11 @@ Suppose you have a directory structure like this:
 │   ├── compressed-2.part1.rar
 │   ├── compressed-2.part2.rar
 │   └── compressed-2.part3.rar
-└── archive3/
-    ├── compressed-3.rar
-    └── info.txt
+├── archive3/
+│   ├── compressed-3.rar
+│   └── info.txt
+└── archive4/
+    └── images.zip
 ```
 
 Mount it with roar:
@@ -183,9 +185,9 @@ roar uses the FUSE (Filesystem in Userspace) interface to present a virtual file
 
 1. roar discovers only the immediate children of the source directory (lazy loading)
 2. Subdirectories are discovered lazily when you navigate into them
-3. RAR archives are scanned only when their containing directory is accessed
+3. RAR and ZIP archives are scanned only when their containing directory is accessed
 4. File reads are serviced by extracting the requested portion from the archive
-5. Non-RAR files in the source directories are passed through and accessible directly
+5. Non-archive files in the source directories are passed through and accessible directly
 
 This lazy loading approach means roar starts quickly even with large directory structures containing many subdirectories.
 

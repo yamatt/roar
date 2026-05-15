@@ -50,9 +50,9 @@ func main() {
 	flag.BoolVar(&allowOther, "allow-other", false, "Allow other users to access the mounted filesystem (requires user_allow_other in /etc/fuse.conf)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options] <source_directory> <mount_point>\n\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "roar presents RAR archives in a directory as a virtual filesystem.\n")
-		fmt.Fprintf(os.Stderr, "The source directory should contain subdirectories with RAR files.\n")
-		fmt.Fprintf(os.Stderr, "Supports split RAR files (.r00, .r01, etc.) and RAR5 format.\n\n")
+		fmt.Fprintf(os.Stderr, "roar presents RAR and ZIP archives in a directory as a virtual filesystem.\n")
+		fmt.Fprintf(os.Stderr, "The source directory should contain subdirectories with archive files.\n")
+		fmt.Fprintf(os.Stderr, "Supports split RAR files (.r00, .r01, etc.), RAR5 format, and ZIP archives.\n\n")
 		fmt.Fprintf(os.Stderr, "Options:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nEnvironment Variables:\n")
