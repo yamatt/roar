@@ -1,4 +1,4 @@
-package rarfs
+package roar
 
 import (
 	"archive/zip"

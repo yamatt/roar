@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/yamatt/roar/internal/rarfs"
+	"github.com/yamatt/roar/internal/roar"
 )
 
 var version = "dev"
@@ -86,7 +86,7 @@ func main() {
 		Level: logLevel,
 	}))
 	slog.SetDefault(logger)
-	rarfs.SetLogger(logger)
+	roar.SetLogger(logger)
 
 	args := flag.Args()
 	if len(args) != 2 {
@@ -144,7 +144,7 @@ func main() {
 
 	logger.Info("mounting filesystem", "source", sourceDir, "mountPoint", mountPoint)
 
-	server, rfs, err := rarfs.Mount(sourceDir, mountPoint, allowOther)
+	server, rfs, err := roar.Mount(sourceDir, mountPoint, allowOther)
 	if err != nil {
 		logger.Error("failed to mount filesystem", "error", err)
 		os.Exit(1)

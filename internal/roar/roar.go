@@ -1,6 +1,6 @@
 // Package rarfs provides a FUSE filesystem that presents the contents of RAR archives
 // in a directory as if they were regular files.
-package rarfs
+package roar
 
 import (
 	"archive/zip"
