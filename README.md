@@ -99,6 +99,9 @@ roar [options] <source_directory> <mount_point>
 
 - `-v`, `--version`: Show version and exit
 - `--allow-other`: Allow other users to access the mounted filesystem (requires `user_allow_other` in `/etc/fuse.conf`)
+- `--archive-layout`: Archive layout mode: `inline` or `pseudo-dir` (default: `inline`).
+  - `inline`: expose archive contents directly under the archive directory.
+  - `pseudo-dir`: expose archives as a pseudo-directory containing archive entries.
 
 ### Environment Variables
 
@@ -204,7 +207,7 @@ go test ./...
 Run tests with verbose output:
 
 ```bash
-go test ./internal/rarfs -v
+go test ./internal/roar -v
 ```
 
 The test suite includes:

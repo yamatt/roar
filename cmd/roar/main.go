@@ -44,10 +44,12 @@ func checkFuseAvailability(logger *slog.Logger) error {
 func main() {
 	var showVersion bool
 	var allowOther bool
+	var archiveLayout string
 
 	flag.BoolVar(&showVersion, "version", false, "Show version and exit")
 	flag.BoolVar(&showVersion, "v", false, "Show version and exit (shorthand)")
 	flag.BoolVar(&allowOther, "allow-other", false, "Allow other users to access the mounted filesystem (requires user_allow_other in /etc/fuse.conf)")
+	flag.StringVar(&archiveLayout, "archive-layout", "inline", "Archive layout mode: inline or pseudo-dir")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [options] <source_directory> <mount_point>\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "roar presents RAR and ZIP archives in a directory as a virtual filesystem.\n")
@@ -136,15 +138,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	layout := roar.ArchiveLayout(archiveLayout)
+	switch layout {
+	case roar.LayoutInline, roar.LayoutPseudoDir:
+		// valid
+	default:
+		logger.Error("invalid archive layout", "layout", archiveLayout)
+		flag.Usage()
+		os.Exit(1)
+	}
+
 	// Check if FUSE libraries are installed
 	if err := checkFuseAvailability(logger); err != nil {
 		logger.Error("FUSE not available", "error", err)
 		os.Exit(1)
 	}
 
-	logger.Info("mounting filesystem", "source", sourceDir, "mountPoint", mountPoint)
+	logger.Info("mounting filesystem", "source", sourceDir, "mountPoint", mountPoint, "layout", layout)
 
-	server, rfs, err := roar.Mount(sourceDir, mountPoint, allowOther)
+	server, rfs, err := roar.Mount(sourceDir, mountPoint, allowOther, layout)
 	if err != nil {
 		logger.Error("failed to mount filesystem", "error", err)
 		os.Exit(1)

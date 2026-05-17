@@ -1249,7 +1249,7 @@ func TestMountWithAllowOther(t *testing.T) {
 	mountPoint := t.TempDir()
 
 	// Test with allowOther = false
-	server, rfs, err := Mount(tempDir, mountPoint, false)
+	server, rfs, err := Mount(tempDir, mountPoint, false, LayoutInline)
 	if err != nil {
 		t.Fatalf("Mount with allowOther=false failed: %v", err)
 	}
@@ -1268,7 +1268,7 @@ func TestMountWithAllowOther(t *testing.T) {
 	// Note: This may fail if user_allow_other is not set in /etc/fuse.conf
 	// We'll just verify it doesn't crash
 	mountPoint2 := t.TempDir()
-	server2, rfs2, err2 := Mount(tempDir, mountPoint2, true)
+	server2, rfs2, err2 := Mount(tempDir, mountPoint2, true, LayoutInline)
 	if err2 != nil {
 		// If it fails, it might be due to /etc/fuse.conf settings
 		// That's expected in many test environments
@@ -1290,7 +1290,7 @@ func TestMountOptions(t *testing.T) {
 	tempDir := t.TempDir()
 
 	// Create a test filesystem
-	rfs, err := NewRarFS(tempDir)
+	rfs, err := NewRarFS(tempDir, LayoutInline)
 	if err != nil {
 		t.Fatalf("NewRarFS failed: %v", err)
 	}

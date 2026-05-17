@@ -85,6 +85,9 @@ type RarFS struct {
 
 	// scanCond is used to signal when a directory scan completes
 	scanCond *sync.Cond
+
+	// layout controls how archive contents are exposed in the virtual filesystem
+	layout ArchiveLayout
 }
 
 // FileEntry represents a file within a RAR archive or a pass-through file
@@ -98,6 +101,16 @@ type FileEntry struct {
 	IsPassthrough bool   // True if this is a pass-through file (not from a RAR archive)
 	SourcePath    string // Full path to the source file (for pass-through files)
 }
+
+// ArchiveLayout controls how archive contents are exposed in the virtual filesystem.
+// "inline" places archive contents alongside other files in the parent directory.
+// "pseudo-dir" places archive contents under a directory named after the archive base.
+type ArchiveLayout string
+
+const (
+	LayoutInline    ArchiveLayout = "inline"
+	LayoutPseudoDir ArchiveLayout = "pseudo-dir"
+)
 
 // isRarFile checks if a file is a RAR archive (including split archives)
 func isRarFile(name string) bool {
@@ -276,7 +289,11 @@ func scanZipArchive(archivePath string) ([]*FileEntry, error) {
 }
 
 // NewRarFS creates a new RarFS rooted at the given source directory
-func NewRarFS(sourceDir string) (*RarFS, error) {
+func NewRarFS(sourceDir string, layout ...ArchiveLayout) (*RarFS, error) {
+	selectedLayout := LayoutInline
+	if len(layout) > 0 {
+		selectedLayout = layout[0]
+	}
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
@@ -294,6 +311,7 @@ func NewRarFS(sourceDir string) (*RarFS, error) {
 		scanningDirs:   make(map[string]bool),
 		watcher:        watcher,
 		watchedDirs:    make(map[string]bool),
+		layout:         selectedLayout,
 	}
 	rfs.scanCond = sync.NewCond(&rfs.scanMu)
 
@@ -1076,10 +1094,10 @@ func extractFileRange(archivePath, internalPath string, offset, length int64) ([
 }
 
 // Mount mounts the RAR filesystem at the specified mount point
-func Mount(sourceDir, mountPoint string, allowOther bool) (*fuse.Server, *RarFS, error) {
-	logger.Info("mounting filesystem", "source", sourceDir, "mountPoint", mountPoint, "allowOther", allowOther)
+func Mount(sourceDir, mountPoint string, allowOther bool, layout ArchiveLayout) (*fuse.Server, *RarFS, error) {
+	logger.Info("mounting filesystem", "source", sourceDir, "mountPoint", mountPoint, "allowOther", allowOther, "layout", layout)
 
-	rfs, err := NewRarFS(sourceDir)
+	rfs, err := NewRarFS(sourceDir, layout)
 	if err != nil {
 		logger.Error("failed to create filesystem", "error", err)
 		return nil, nil, err
