@@ -1,0 +1,6 @@
+tmp/
+├── readme.txt
+└── split
+    └── complete
+
+2 directories, 2 files
