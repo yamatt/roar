@@ -1,5 +1,3 @@
-// Package rarfs provides a FUSE filesystem that presents the contents of RAR archives
-// in a directory as if they were regular files.
 package roar
 
 import (
@@ -10,160 +8,91 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/nwaples/rardecode/v2"
 )
 
-// logger is the package-level logger for rarfs operations
 var logger = slog.Default()
 
-// maxReadSize is the maximum size for a single read operation (1MB)
-// This prevents excessive memory allocation from large read requests
 const maxReadSize = 1 << 20 // 1MB
+const attrValidDuration = 60.0
+const entryValidDuration = 60.0
 
-// attrValidDuration is how long FUSE caches file/directory attributes
-// A longer duration reduces Nautilus/file manager refresh issues
-const attrValidDuration = 60.0 // 60 seconds
-
-// entryValidDuration is how long FUSE caches directory entry lookups
-const entryValidDuration = 60.0 // 60 seconds
-
-// SetLogger sets the logger for the rarfs package
 func SetLogger(l *slog.Logger) {
 	logger = l
 }
 
-// RarFS represents a FUSE filesystem for RAR archives
 type RarFS struct {
 	fs.Inode
 
-	// sourceDir is the directory containing directories with RAR archives
-	sourceDir string
-
-	// fileEntries maps virtual paths to their archive info
-	fileEntries map[string]*FileEntry
-
-	// directories maps virtual paths to directory info
-	directories map[string][]string
-
-	// scannedDirs tracks which directories have had their RAR archives scanned
-	scannedDirs map[string]bool
-
-	// discoveredDirs tracks which directories have had their subdirectories discovered
-	discoveredDirs map[string]bool
-
-	// pendingDirs maps virtual paths to their absolute source paths for lazy scanning
-	pendingDirs map[string]string
-
-	// inodeCounter is used to generate stable inode numbers
+	sourceDir    string
 	inodeCounter uint64
-
-	// pathToInode maps virtual paths to stable inode numbers
-	pathToInode map[string]uint64
-
-	// scanningDirs tracks which directories are currently being scanned
-	// This prevents duplicate concurrent scans of the same directory
-	scanningDirs map[string]bool
-
-	// watcher monitors the source directory for changes
-	watcher *fsnotify.Watcher
-
-	// watchedDirs tracks which directories are currently being watched
-	watchedDirs map[string]bool
-
-	// mu protects all the above maps
-	mu sync.RWMutex
-
-	// scanMu protects scanningDirs and scanCond
-	scanMu sync.Mutex
-
-	// scanCond is used to signal when a directory scan completes
-	scanCond *sync.Cond
-
-	// layout controls how archive contents are exposed in the virtual filesystem
-	layout ArchiveLayout
+	pathToInode  map[string]uint64
+	mu           sync.Mutex
 }
 
-// FileEntry represents a file within a RAR archive or a pass-through file
 type FileEntry struct {
 	Name          string
 	Size          int64
 	ModTime       int64
 	IsDir         bool
-	ArchivePath   string // Path to the .rar file (empty for pass-through files)
-	InternalPath  string // Path within the archive (empty for pass-through files)
-	IsPassthrough bool   // True if this is a pass-through file (not from a RAR archive)
-	SourcePath    string // Full path to the source file (for pass-through files)
+	ArchivePath   string
+	InternalPath  string
+	IsPassthrough bool
+	SourcePath    string
 }
 
-// ArchiveLayout controls how archive contents are exposed in the virtual filesystem.
-// "inline" places archive contents alongside other files in the parent directory.
-// "pseudo-dir" places archive contents under a directory named after the archive base.
-type ArchiveLayout string
-
-const (
-	LayoutInline    ArchiveLayout = "inline"
-	LayoutPseudoDir ArchiveLayout = "pseudo-dir"
-)
-
-// isRarFile checks if a file is a RAR archive (including split archives)
 func isRarFile(name string) bool {
 	lower := strings.ToLower(name)
 	if strings.HasSuffix(lower, ".rar") {
 		return true
 	}
-	// Match split RAR files like .r00, .r01, .r000, .r001, etc.
 	matched, _ := regexp.MatchString(`\.r\d+$`, lower)
 	return matched
 }
 
-// isZipFile checks if a file is a ZIP archive
 func isZipFile(name string) bool {
-	lower := strings.ToLower(name)
-	return strings.HasSuffix(lower, ".zip")
+	return strings.HasSuffix(strings.ToLower(name), ".zip")
 }
 
-// isFirstRarPart checks if a file is the first part of a RAR archive
-// For new-style .partN.rar naming, only .part1.rar is the first part
-// For old-style naming, the .rar file (without .partN) is the first part
 func isFirstRarPart(name string) bool {
 	lower := strings.ToLower(name)
-
-	// Check for new-style .partN.rar naming
-	// e.g., split.part1.rar is first, split.part2.rar is not
-	if matched, _ := regexp.MatchString(`\.part\d+\.rar$`, lower); matched {
-		return strings.HasSuffix(lower, ".part1.rar")
+	if strings.HasSuffix(lower, ".part1.rar") {
+		return true
 	}
-
-	// For standard .rar files (without .partN), it's the first part
-	// The rardecode library handles finding the other parts automatically
 	if strings.HasSuffix(lower, ".rar") {
 		return true
 	}
-
-	// For old-style splits, .r00 might be first, but .rar should exist
-	// We'll prefer .rar if it exists
 	return false
 }
 
-// findRarArchives finds all first-part RAR archives in the given directory
-// It identifies the first part of multi-volume archives (e.g., .part1.rar or .rar)
-// and returns only those, as the rardecode library handles finding subsequent parts
+func archiveBaseName(name string) string {
+	lower := strings.ToLower(name)
+	if strings.HasSuffix(lower, ".part1.rar") {
+		return name[:len(name)-len(".part1.rar")]
+	}
+	if strings.HasSuffix(lower, ".rar") {
+		return name[:len(name)-len(".rar")]
+	}
+	return strings.TrimSuffix(name, filepath.Ext(name))
+}
+
+func normalizeArchivePath(name string) string {
+	return strings.TrimSuffix(strings.TrimPrefix(name, "/"), "/")
+}
+
 func findRarArchives(dir string) ([]string, error) {
 	var archives []string
-
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
-
-	// Find all first-part RAR files
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -172,20 +101,15 @@ func findRarArchives(dir string) ([]string, error) {
 			archives = append(archives, filepath.Join(dir, entry.Name()))
 		}
 	}
-
 	return archives, nil
 }
 
-// findZipArchives finds all ZIP archives in the given directory
 func findZipArchives(dir string) ([]string, error) {
 	var archives []string
-
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
-
-	// Find all ZIP files
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -194,537 +118,72 @@ func findZipArchives(dir string) ([]string, error) {
 			archives = append(archives, filepath.Join(dir, entry.Name()))
 		}
 	}
-
 	return archives, nil
 }
 
-// findPassthroughFiles finds all non-archive files in the given directory
-// These files will be passed through to the virtual filesystem
-func findPassthroughFiles(dir string) ([]*FileEntry, error) {
-	var files []*FileEntry
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		// Skip archive files (RAR and ZIP)
-		if isRarFile(entry.Name()) || isZipFile(entry.Name()) {
-			continue
-		}
-
-		info, err := entry.Info()
-		if err != nil {
-			logger.Warn("error getting file info", "file", entry.Name(), "error", err)
-			continue
-		}
-
-		file := &FileEntry{
-			Name:          entry.Name(),
-			Size:          info.Size(),
-			ModTime:       info.ModTime().Unix(),
-			IsDir:         false,
-			IsPassthrough: true,
-			SourcePath:    filepath.Join(dir, entry.Name()),
-		}
-		files = append(files, file)
-	}
-
-	return files, nil
-}
-
-// scanArchive scans a RAR archive and returns the list of files it contains
-// Uses List() to efficiently read only archive headers without decompressing content
-// This is more efficient than using OpenReader().Next() which can access more data
 func scanArchive(archivePath string) ([]*FileEntry, error) {
 	files, err := rardecode.List(archivePath)
 	if err != nil {
 		return nil, err
 	}
-
 	var entries []*FileEntry
-
 	for _, f := range files {
-		entry := &FileEntry{
-			Name:         f.Name,
+		entries = append(entries, &FileEntry{
+			Name:         normalizeArchivePath(f.Name),
 			Size:         f.UnPackedSize,
 			ModTime:      f.ModificationTime.Unix(),
 			IsDir:        f.IsDir,
 			ArchivePath:  archivePath,
-			InternalPath: f.Name,
-		}
-		entries = append(entries, entry)
+			InternalPath: normalizeArchivePath(f.Name),
+		})
 	}
-
 	return entries, nil
 }
 
-// scanZipArchive scans a ZIP archive and returns its file entries
 func scanZipArchive(archivePath string) ([]*FileEntry, error) {
 	r, err := zip.OpenReader(archivePath)
 	if err != nil {
 		return nil, err
 	}
-	defer r.Close()
-
+	defer func() { _ = r.Close() }()
 	var entries []*FileEntry
-
 	for _, f := range r.File {
-		entry := &FileEntry{
-			Name:         f.Name,
+		entries = append(entries, &FileEntry{
+			Name:         normalizeArchivePath(f.Name),
 			Size:         int64(f.UncompressedSize64),
 			ModTime:      f.Modified.Unix(),
 			IsDir:        f.FileInfo().IsDir(),
 			ArchivePath:  archivePath,
-			InternalPath: f.Name,
-		}
-		entries = append(entries, entry)
+			InternalPath: normalizeArchivePath(f.Name),
+		})
 	}
-
 	return entries, nil
 }
 
-// NewRarFS creates a new RarFS rooted at the given source directory
-func NewRarFS(sourceDir string, layout ...ArchiveLayout) (*RarFS, error) {
-	selectedLayout := LayoutInline
-	if len(layout) > 0 {
-		selectedLayout = layout[0]
-	}
-	watcher, err := fsnotify.NewWatcher()
+func NewRarFS(sourceDir string) (*RarFS, error) {
+	info, err := os.Stat(sourceDir)
 	if err != nil {
 		return nil, err
 	}
-
-	rfs := &RarFS{
-		sourceDir:      sourceDir,
-		fileEntries:    make(map[string]*FileEntry),
-		directories:    make(map[string][]string),
-		scannedDirs:    make(map[string]bool),
-		discoveredDirs: make(map[string]bool),
-		pendingDirs:    make(map[string]string),
-		inodeCounter:   1, // Start at 1; 0 is reserved
-		pathToInode:    make(map[string]uint64),
-		scanningDirs:   make(map[string]bool),
-		watcher:        watcher,
-		watchedDirs:    make(map[string]bool),
-		layout:         selectedLayout,
+	if !info.IsDir() {
+		return nil, os.ErrInvalid
 	}
-	rfs.scanCond = sync.NewCond(&rfs.scanMu)
-
-	if err := rfs.scan(); err != nil {
-		_ = watcher.Close()
-		return nil, err
-	}
-
-	// Start watching the source directory
-	go rfs.watchForChanges()
-
-	return rfs, nil
+	return &RarFS{
+		sourceDir:    sourceDir,
+		inodeCounter: 1,
+		pathToInode:  make(map[string]uint64),
+	}, nil
 }
 
-// scan initializes the filesystem by discovering only immediate children of the source directory.
-// Subdirectories and their contents are discovered lazily when accessed.
-// RAR archive scanning is also deferred until directory contents are accessed.
-func (r *RarFS) scan() error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	// Clear existing entries
-	r.fileEntries = make(map[string]*FileEntry)
-	r.directories = make(map[string][]string)
-	r.scannedDirs = make(map[string]bool)
-	r.discoveredDirs = make(map[string]bool)
-	r.pendingDirs = make(map[string]string)
-	r.pathToInode = make(map[string]uint64)
-	r.scanningDirs = make(map[string]bool)
-	r.inodeCounter = 1
-
-	logger.Info("initializing filesystem", "path", r.sourceDir)
-
-	// Discover immediate children of the source directory (lazy loading)
-	if err := r.discoverDirectoryContentsLocked("", r.sourceDir); err != nil {
-		logger.Error("error discovering source directory contents", "error", err)
-		return err
-	}
-
-	// Mark root as discovered
-	r.discoveredDirs[""] = true
-
-	logger.Info("filesystem initialized", "directories", len(r.directories[""]))
-	return nil
+type dirEntry struct {
+	name  string
+	isDir bool
+	file  *FileEntry
 }
 
-// watchForChanges monitors the source directory for changes using inotify
-func (r *RarFS) watchForChanges() {
-	for {
-		select {
-		case event, ok := <-r.watcher.Events:
-			if !ok {
-				return
-			}
-			r.handleFileSystemEvent(event)
-		case err, ok := <-r.watcher.Errors:
-			if !ok {
-				return
-			}
-			logger.Error("filesystem watcher error", "error", err)
-		}
-	}
-}
-
-// handleFileSystemEvent processes filesystem events and invalidates caches
-func (r *RarFS) handleFileSystemEvent(event fsnotify.Event) {
-	// Determine the relative path from the source directory
-	relPath, err := filepath.Rel(r.sourceDir, event.Name)
-	if err != nil {
-		logger.Debug("error computing relative path", "path", event.Name, "error", err)
-		return
-	}
-
-	// Get the parent directory
-	parentDir := filepath.Dir(relPath)
-	if parentDir == "." {
-		parentDir = ""
-	}
-
-	logger.Debug("filesystem event", "event", event.Op.String(), "path", relPath, "parentDir", parentDir)
-
-	// For any write, create, remove, or rename event, invalidate the parent directory's cache
-	if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0 {
-		r.invalidateDirectory(parentDir)
-	}
-}
-
-// invalidateDirectory clears the cache for a directory, forcing it to be rescanned
-func (r *RarFS) invalidateDirectory(relDir string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	logger.Info("invalidating directory cache", "directory", relDir)
-
-	// Mark the directory as not scanned and not discovered
-	delete(r.scannedDirs, relDir)
-	delete(r.discoveredDirs, relDir)
-
-	// Clear directory entries
-	delete(r.directories, relDir)
-
-	// Remove file entries for this directory
-	for path := range r.fileEntries {
-		if strings.HasPrefix(path, relDir+"/") || path == relDir {
-			delete(r.fileEntries, path)
-		}
-	}
-
-	// Restore pendingDirs entry so the directory can be rediscovered
-	// This ensures the directory can be rescanned after invalidation
-	if r.pendingDirs != nil {
-		if relDir == "" {
-			// Root directory
-			r.pendingDirs[""] = r.sourceDir
-		} else {
-			// For subdirectories, reconstruct the absolute path
-			r.pendingDirs[relDir] = filepath.Join(r.sourceDir, relDir)
-		}
-	}
-}
-
-// discoverDirectoryContentsLocked discovers the immediate contents of a directory.
-// This includes subdirectories and pass-through files.
-// Must be called with the write lock held.
-func (r *RarFS) discoverDirectoryContentsLocked(relDir, absPath string) error {
-	entries, err := os.ReadDir(absPath)
-	if err != nil {
-		return err
-	}
-
-	// Watch this directory for changes
-	if err := r.watcher.Add(absPath); err != nil {
-		logger.Debug("failed to watch directory", "path", absPath, "error", err)
-	}
-	r.watchedDirs[absPath] = true
-
-	for _, entry := range entries {
-		if entry.IsDir() {
-			// Add subdirectory to the directory listing
-			r.addToDirectory(relDir, entry.Name())
-
-			// Store the absolute path for lazy scanning later
-			subRelPath := entry.Name()
-			if relDir != "" {
-				subRelPath = filepath.Join(relDir, entry.Name())
-			}
-			r.pendingDirs[subRelPath] = filepath.Join(absPath, entry.Name())
-
-			logger.Debug("discovered directory", "path", subRelPath)
-		} else if !isRarFile(entry.Name()) && !isZipFile(entry.Name()) {
-			// Non-archive file - add as pass-through
-			info, err := entry.Info()
-			if err != nil {
-				logger.Warn("error getting file info", "file", entry.Name(), "error", err)
-				continue
-			}
-
-			virtualPath := entry.Name()
-			if relDir != "" {
-				virtualPath = filepath.Join(relDir, entry.Name())
-			}
-
-			file := &FileEntry{
-				Name:          virtualPath,
-				Size:          info.Size(),
-				ModTime:       info.ModTime().Unix(),
-				IsDir:         false,
-				IsPassthrough: true,
-				SourcePath:    filepath.Join(absPath, entry.Name()),
-			}
-
-			r.fileEntries[virtualPath] = file
-			r.addToDirectory(relDir, entry.Name())
-
-			logger.Debug("discovered pass-through file", "path", virtualPath)
-		}
-	}
-
-	return nil
-}
-
-// ensureDirDiscovered ensures that the subdirectories and pass-through files of a directory have been discovered.
-// This is called lazily when directory contents are accessed.
-func (r *RarFS) ensureDirDiscovered(relDir string) {
-	// Check if already discovered (with read lock first for performance)
-	r.mu.RLock()
-	if r.discoveredDirs[relDir] {
-		r.mu.RUnlock()
-		return
-	}
-	_, hasPending := r.pendingDirs[relDir]
-	r.mu.RUnlock()
-
-	if !hasPending {
-		return
-	}
-
-	// Need to discover - acquire write lock
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	// Double-check after acquiring write lock
-	if r.discoveredDirs[relDir] {
-		return
-	}
-
-	// Re-check pendingDirs under write lock
-	absPath, hasPending := r.pendingDirs[relDir]
-	if !hasPending {
-		return
-	}
-
-	logger.Debug("lazy discovering directory contents", "path", relDir)
-
-	// Discover subdirectories and pass-through files
-	if err := r.discoverDirectoryContentsLocked(relDir, absPath); err != nil {
-		logger.Warn("error discovering directory contents", "path", relDir, "error", err)
-	}
-
-	// Mark as discovered
-	r.discoveredDirs[relDir] = true
-}
-
-// ensureDirScanned ensures that the RAR and ZIP archives in a directory have been scanned
-// This is called lazily when directory contents are accessed.
-// The implementation allows concurrent scans of different directories to improve performance.
-func (r *RarFS) ensureDirScanned(relDir string) {
-	// First ensure the directory contents have been discovered
-	r.ensureDirDiscovered(relDir)
-
-	// Check if already scanned (with read lock first for performance)
-	r.mu.RLock()
-	if r.scannedDirs[relDir] {
-		r.mu.RUnlock()
-		return
-	}
-	absPath, hasPending := r.pendingDirs[relDir]
-	r.mu.RUnlock()
-
-	if !hasPending {
-		return
-	}
-
-	// Check if another goroutine is already scanning this directory
-	// Use a separate mutex to coordinate scans without blocking reads
-	r.scanMu.Lock()
-	for r.scanningDirs[relDir] {
-		// Another goroutine is scanning - wait for it to complete using condition variable
-		r.scanCond.Wait()
-	}
-	// Double-check under the main lock that it's not already scanned
-	r.mu.RLock()
-	if r.scannedDirs[relDir] {
-		r.mu.RUnlock()
-		r.scanMu.Unlock()
-		return
-	}
-	r.mu.RUnlock()
-
-	// Mark that we're scanning this directory
-	r.scanningDirs[relDir] = true
-	r.scanMu.Unlock()
-
-	// Use defer to ensure cleanup always happens
-	defer r.cleanupScanningMarker(relDir)
-
-	logger.Debug("lazy scanning directory for archives", "path", relDir)
-
-	// Do the expensive scanning OUTSIDE the lock to allow concurrent operations
-	rarArchives, err := findRarArchives(absPath)
-	if err != nil {
-		logger.Debug("error finding RAR archives in directory", "path", relDir, "error", err)
-	}
-
-	zipArchives, err := findZipArchives(absPath)
-	if err != nil {
-		logger.Debug("error finding ZIP archives in directory", "path", relDir, "error", err)
-	}
-
-	// Scan all archives and collect results
-	type archiveResult struct {
-		archivePath string
-		files       []*FileEntry
-	}
-	var results []archiveResult
-
-	if len(rarArchives) > 0 {
-		logger.Info("found RAR archives", "directory", relDir, "count", len(rarArchives))
-
-		for _, archivePath := range rarArchives {
-			logger.Debug("scanning RAR archive", "archive", archivePath)
-			files, err := scanArchive(archivePath)
-			if err != nil {
-				logger.Warn("error scanning RAR archive", "archive", archivePath, "error", err)
-				continue
-			}
-
-			logger.Debug("found files in RAR archive", "archive", archivePath, "count", len(files))
-			results = append(results, archiveResult{archivePath: archivePath, files: files})
-		}
-	}
-
-	if len(zipArchives) > 0 {
-		logger.Info("found ZIP archives", "directory", relDir, "count", len(zipArchives))
-
-		for _, archivePath := range zipArchives {
-			logger.Debug("scanning ZIP archive", "archive", archivePath)
-			files, err := scanZipArchive(archivePath)
-			if err != nil {
-				logger.Warn("error scanning ZIP archive", "archive", archivePath, "error", err)
-				continue
-			}
-
-			logger.Debug("found files in ZIP archive", "archive", archivePath, "count", len(files))
-			results = append(results, archiveResult{archivePath: archivePath, files: files})
-		}
-	}
-
-	// Now acquire write lock to update the data structures
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	// Double-check in case another goroutine completed first (shouldn't happen with current logic)
-	if r.scannedDirs[relDir] {
-		return
-	}
-
-	// Apply the results
-	for _, result := range results {
-		for _, f := range result.files {
-			// Virtual path: relDir/internal_path
-			virtualPath := filepath.Join(relDir, f.InternalPath)
-			f.Name = virtualPath
-
-			if f.IsDir {
-				// Add to directories map
-				parentDir := filepath.Dir(virtualPath)
-				baseName := filepath.Base(virtualPath)
-				r.addToDirectory(parentDir, baseName)
-			} else {
-				r.fileEntries[virtualPath] = f
-				// Ensure parent directories exist in the map
-				r.ensureDirectoryPath(filepath.Dir(virtualPath))
-				// Add file to its parent directory
-				parentDir := filepath.Dir(virtualPath)
-				baseName := filepath.Base(virtualPath)
-				r.addToDirectory(parentDir, baseName)
-			}
-		}
-	}
-
-	// Mark as scanned
-	r.scannedDirs[relDir] = true
-}
-
-// cleanupScanningMarker removes the scanning marker and signals waiting goroutines
-func (r *RarFS) cleanupScanningMarker(relDir string) {
-	r.scanMu.Lock()
-	delete(r.scanningDirs, relDir)
-	r.scanCond.Broadcast()
-	r.scanMu.Unlock()
-}
-
-// ensureDirectoryPath ensures all parent directories in a path exist in the directories map
-func (r *RarFS) ensureDirectoryPath(path string) {
-	if path == "" || path == "." {
-		return
-	}
-
-	parts := strings.Split(filepath.ToSlash(path), "/")
-	currentPath := ""
-
-	for i, part := range parts {
-		if i == 0 {
-			r.addToDirectory("", part)
-			currentPath = part
-		} else {
-			r.addToDirectory(currentPath, part)
-			currentPath = filepath.Join(currentPath, part)
-		}
-	}
-}
-
-// addToDirectory adds a name to a directory's listing if not already present
-// Also assigns a stable inode number to the entry
-func (r *RarFS) addToDirectory(dir, name string) {
-	fullPath := name
-	if dir != "" {
-		fullPath = filepath.Join(dir, name)
-	}
-	for _, existing := range r.directories[dir] {
-		if existing == name {
-			return
-		}
-	}
-	r.directories[dir] = append(r.directories[dir], name)
-	// Assign a stable inode number to this entry
-	r.assignInode(fullPath)
-}
-
-// getInode returns a stable inode number for a given path
-// Must be called with at least a read lock held
 func (r *RarFS) getInode(path string) uint64 {
-	if ino, ok := r.pathToInode[path]; ok {
-		return ino
-	}
-	// This shouldn't happen often - we assign inodes when creating entries
-	return 0
-}
-
-// assignInode assigns a stable inode number to a path if not already assigned
-// Must be called with a write lock held
-func (r *RarFS) assignInode(path string) uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if ino, ok := r.pathToInode[path]; ok {
 		return ino
 	}
@@ -733,28 +192,271 @@ func (r *RarFS) assignInode(path string) uint64 {
 	return r.inodeCounter
 }
 
-// RarFSRoot is the root node of the FUSE filesystem
+func (r *RarFS) resolveArchivePath(relDir string) (string, string, bool, error) {
+	relDir = strings.TrimPrefix(filepath.ToSlash(relDir), ".")
+	relDir = strings.TrimPrefix(relDir, "/")
+	if relDir == "" {
+		return "", "", false, nil
+	}
+
+	segments := strings.Split(relDir, "/")
+	baseDir := r.sourceDir
+	for i, segment := range segments {
+		candidateDir := filepath.Join(baseDir, segment)
+		if info, err := os.Stat(candidateDir); err == nil && info.IsDir() {
+			baseDir = candidateDir
+			continue
+		} else if err != nil && !os.IsNotExist(err) {
+			return "", "", false, err
+		}
+
+		archivePath, found, err := findArchiveFile(baseDir, segment)
+		if err != nil {
+			return "", "", false, err
+		}
+		if found {
+			internalPath := strings.Join(segments[i+1:], "/")
+			internalPath = strings.TrimPrefix(strings.TrimPrefix(internalPath, "/"), "/")
+			return archivePath, internalPath, true, nil
+		}
+
+		return "", "", false, nil
+	}
+
+	return "", "", false, nil
+}
+
+func findArchiveFile(baseDir, archiveName string) (string, bool, error) {
+	candidates := []string{
+		filepath.Join(baseDir, archiveName+".zip"),
+		filepath.Join(baseDir, archiveName+".rar"),
+		filepath.Join(baseDir, archiveName+".part1.rar"),
+	}
+	for _, candidate := range candidates {
+		info, err := os.Stat(candidate)
+		if err == nil && !info.IsDir() {
+			return candidate, true, nil
+		}
+		if err != nil && !os.IsNotExist(err) {
+			return "", false, err
+		}
+	}
+	return "", false, nil
+}
+
+func (r *RarFS) listDirectoryEntries(relDir string) ([]dirEntry, bool, error) {
+	relDir = strings.TrimPrefix(filepath.ToSlash(relDir), ".")
+	relDir = strings.TrimPrefix(relDir, "/")
+	entries := make(map[string]*dirEntry)
+
+	archivePath, internalPrefix, isArchive, err := r.resolveArchivePath(relDir)
+	if err != nil {
+		return nil, false, err
+	}
+	if isArchive {
+		dirExists, err := r.addArchiveDirectoryEntries(archivePath, internalPrefix, relDir, entries)
+		if err != nil {
+			return nil, false, err
+		}
+		if !dirExists {
+			return nil, false, nil
+		}
+		result := make([]dirEntry, 0, len(entries))
+		for _, entry := range entries {
+			result = append(result, *entry)
+		}
+		sort.Slice(result, func(i, j int) bool {
+			return result[i].name < result[j].name
+		})
+		return result, true, nil
+	}
+
+	absDir := filepath.Join(r.sourceDir, relDir)
+	dirExists := false
+
+	if info, err := os.Stat(absDir); err == nil && info.IsDir() {
+		dirExists = true
+		if err := r.addActualSourceDirectoryEntries(absDir, relDir, entries); err != nil {
+			return nil, false, err
+		}
+	} else if err != nil && !os.IsNotExist(err) {
+		return nil, false, err
+	}
+
+	rarFound, err := r.addArchiveVirtualDirectories(absDir, relDir, entries)
+	if err != nil {
+		return nil, false, err
+	}
+	if rarFound {
+		dirExists = true
+	}
+
+	if !dirExists {
+		return nil, false, nil
+	}
+
+	result := make([]dirEntry, 0, len(entries))
+	for _, entry := range entries {
+		result = append(result, *entry)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].name < result[j].name
+	})
+	return result, true, nil
+}
+
+func (r *RarFS) addArchiveDirectoryEntries(archivePath, internalPrefix, relDir string, entries map[string]*dirEntry) (bool, error) {
+	var archiveEntries []*FileEntry
+	var err error
+	if isZipFile(archivePath) {
+		archiveEntries, err = scanZipArchive(archivePath)
+	} else {
+		archiveEntries, err = scanArchive(archivePath)
+	}
+	if err != nil {
+		return false, err
+	}
+
+	prefix := strings.TrimPrefix(strings.TrimPrefix(internalPrefix, "/"), "/")
+	dirExists := false
+	for _, file := range archiveEntries {
+		path := file.InternalPath
+		if prefix != "" {
+			if path == prefix {
+				if file.IsDir {
+					dirExists = true
+				}
+				continue
+			}
+			if !strings.HasPrefix(path, prefix+"/") {
+				continue
+			}
+			path = strings.TrimPrefix(path, prefix+"/")
+		}
+
+		parts := strings.Split(path, "/")
+		if len(parts) == 0 || parts[0] == "" {
+			continue
+		}
+		name := parts[0]
+		isDir := len(parts) > 1 || file.IsDir
+		entry, ok := entries[name]
+		if ok {
+			entry.isDir = entry.isDir || isDir
+			dirExists = true
+			continue
+		}
+		var fileEntry *FileEntry
+		if !isDir {
+			fileEntry = &FileEntry{
+				Name:         filepath.Join(relDir, name),
+				Size:         file.Size,
+				ModTime:      file.ModTime,
+				IsDir:        false,
+				ArchivePath:  archivePath,
+				InternalPath: file.InternalPath,
+			}
+		}
+		entries[name] = &dirEntry{name: name, isDir: isDir, file: fileEntry}
+		dirExists = true
+	}
+	return dirExists, nil
+}
+
+func (r *RarFS) addActualSourceDirectoryEntries(absDir, relDir string, entries map[string]*dirEntry) error {
+	items, err := os.ReadDir(absDir)
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		name := item.Name()
+		if item.IsDir() {
+			entries[name] = &dirEntry{name: name, isDir: true}
+			continue
+		}
+		if isRarFile(name) && isFirstRarPart(name) {
+			archiveName := archiveBaseName(name)
+			entries[archiveName] = &dirEntry{name: archiveName, isDir: true}
+			continue
+		}
+		if isZipFile(name) {
+			continue
+		}
+		info, err := item.Info()
+		if err != nil {
+			logger.Warn("error reading pass-through file info", "file", name, "error", err)
+			continue
+		}
+		entries[name] = &dirEntry{
+			name:  name,
+			isDir: false,
+			file: &FileEntry{
+				Name:          filepath.Join(relDir, name),
+				Size:          info.Size(),
+				ModTime:       info.ModTime().Unix(),
+				IsDir:         false,
+				IsPassthrough: true,
+				SourcePath:    filepath.Join(absDir, name),
+			},
+		}
+	}
+	return nil
+}
+
+func (r *RarFS) addArchiveVirtualDirectories(absDir, relDir string, entries map[string]*dirEntry) (bool, error) {
+	var found bool
+	zipArchives, err := findZipArchives(absDir)
+	if err != nil {
+		return false, err
+	}
+	for _, archivePath := range zipArchives {
+		name := archiveBaseName(filepath.Base(archivePath))
+		entries[name] = &dirEntry{name: name, isDir: true}
+		found = true
+	}
+	rarArchives, err := findRarArchives(absDir)
+	if err != nil {
+		return false, err
+	}
+	for _, archivePath := range rarArchives {
+		name := archiveBaseName(filepath.Base(archivePath))
+		entries[name] = &dirEntry{name: name, isDir: true}
+		found = true
+	}
+	return found, nil
+}
+
+func (r *RarFS) lookupInDirectory(relDir, name string) (bool, *FileEntry, bool, error) {
+	entries, exists, err := r.listDirectoryEntries(relDir)
+	if err != nil || !exists {
+		return false, nil, false, err
+	}
+	for _, entry := range entries {
+		if entry.name == name {
+			return entry.isDir, entry.file, true, nil
+		}
+	}
+	return false, nil, false, nil
+}
+
 type RarFSRoot struct {
 	fs.Inode
 	rfs *RarFS
 }
 
-// RarFSDir is a directory node
 type RarFSDir struct {
 	fs.Inode
-	rfs  *RarFS
+	rfs *RarFS
 	path string
 }
 
-// RarFSFile is a file node
 type RarFSFile struct {
 	fs.Inode
-	rfs   *RarFS
-	path  string
+	rfs  *RarFS
+	path string
 	entry *FileEntry
 }
 
-// Ensure interfaces are implemented
 var _ fs.NodeReaddirer = (*RarFSRoot)(nil)
 var _ fs.NodeLookuper = (*RarFSRoot)(nil)
 var _ fs.NodeGetattrer = (*RarFSRoot)(nil)
@@ -765,263 +467,157 @@ var _ fs.NodeGetattrer = (*RarFSFile)(nil)
 var _ fs.NodeOpener = (*RarFSFile)(nil)
 var _ fs.NodeReader = (*RarFSFile)(nil)
 
-// Getattr returns file attributes for root
 func (r *RarFSRoot) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = 0755 | syscall.S_IFDIR
-	out.Ino = 1 // Root always has inode 1
+	out.Ino = 1
 	out.SetTimeout(attrValidDuration)
 	return 0
 }
 
-// Readdir lists the contents of the root directory
 func (r *RarFSRoot) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	// Trigger rescan of root directory on every Readdir
-	logger.Debug("root Readdir called - triggering rescan")
-	r.rfs.invalidateDirectory("")
-	r.rfs.ensureDirDiscovered("")
-
-	r.rfs.mu.RLock()
-	defer r.rfs.mu.RUnlock()
-
-	logger.Debug("root Readdir entries", "entries", len(r.rfs.directories[""]))
-
-	var entries []fuse.DirEntry
-
-	for _, name := range r.rfs.directories[""] {
-		ino := r.rfs.getInode(name)
-		entries = append(entries, fuse.DirEntry{
-			Name: name,
-			Mode: syscall.S_IFDIR,
-			Ino:  ino,
-		})
-		logger.Debug("adding root entry", "name", name, "ino", ino)
+	entries, exists, err := r.rfs.listDirectoryEntries("")
+	if err != nil || !exists {
+		return nil, syscall.ENOENT
 	}
-
-	return fs.NewListDirStream(entries), 0
+	var dirEntries []fuse.DirEntry
+	for _, entry := range entries {
+		mode := syscall.S_IFREG
+		if entry.isDir {
+			mode = syscall.S_IFDIR
+		}
+		ino := r.rfs.getInode(entry.name)
+		dirEntries = append(dirEntries, fuse.DirEntry{Name: entry.name, Mode: uint32(mode), Ino: ino})
+	}
+	return fs.NewListDirStream(dirEntries), 0
 }
 
-// Lookup finds a child node by name
 func (r *RarFSRoot) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	r.rfs.mu.RLock()
-
-	// Check if it's a directory
-	if _, ok := r.rfs.directories[name]; ok {
-		ino := r.rfs.getInode(name)
-		r.rfs.mu.RUnlock()
+	isDir, file, found, err := r.rfs.lookupInDirectory("", name)
+	if err != nil {
+		return nil, syscall.EIO
+	}
+	if !found {
+		return nil, syscall.ENOENT
+	}
+	ino := r.rfs.getInode(name)
+	if isDir {
 		child := &RarFSDir{rfs: r.rfs, path: name}
 		out.SetEntryTimeout(entryValidDuration)
 		out.SetAttrTimeout(attrValidDuration)
 		return r.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFDIR, Ino: ino}), 0
 	}
-
-	// Check if the name exists in root directory listings
-	for _, d := range r.rfs.directories[""] {
-		if d == name {
-			ino := r.rfs.getInode(name)
-			r.rfs.mu.RUnlock()
-			child := &RarFSDir{rfs: r.rfs, path: name}
-			out.SetEntryTimeout(entryValidDuration)
-			out.SetAttrTimeout(attrValidDuration)
-			return r.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFDIR, Ino: ino}), 0
-		}
-	}
-
-	// Check if it's a file in root
-	if entry, ok := r.rfs.fileEntries[name]; ok {
-		ino := r.rfs.getInode(name)
-		r.rfs.mu.RUnlock()
-		child := &RarFSFile{rfs: r.rfs, path: name, entry: entry}
-		out.Size = uint64(entry.Size)
-		out.SetEntryTimeout(entryValidDuration)
-		out.SetAttrTimeout(attrValidDuration)
-		return r.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFREG, Ino: ino}), 0
-	}
-
-	r.rfs.mu.RUnlock()
-	return nil, syscall.ENOENT
+	child := &RarFSFile{rfs: r.rfs, path: name, entry: file}
+	out.Size = uint64(file.Size)
+	out.SetEntryTimeout(entryValidDuration)
+	out.SetAttrTimeout(attrValidDuration)
+	return r.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFREG, Ino: ino}), 0
 }
 
-// Getattr returns file attributes for directory
 func (d *RarFSDir) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = 0755 | syscall.S_IFDIR
-	d.rfs.mu.RLock()
 	out.Ino = d.rfs.getInode(d.path)
-	d.rfs.mu.RUnlock()
 	out.SetTimeout(attrValidDuration)
 	return 0
 }
 
-// Readdir lists the contents of a directory
 func (d *RarFSDir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	// Trigger rescan on every Readdir to pick up new files
-	logger.Debug("dir Readdir called - triggering rescan", "path", d.path)
-	d.rfs.invalidateDirectory(d.path)
-
-	// Ensure RAR archives in this directory have been scanned (lazy loading)
-	d.rfs.ensureDirScanned(d.path)
-
-	d.rfs.mu.RLock()
-	defer d.rfs.mu.RUnlock()
-
-	var entries []fuse.DirEntry
-
-	for _, name := range d.rfs.directories[d.path] {
-		fullPath := filepath.Join(d.path, name)
-		ino := d.rfs.getInode(fullPath)
-		if _, ok := d.rfs.fileEntries[fullPath]; ok {
-			entries = append(entries, fuse.DirEntry{
-				Name: name,
-				Mode: syscall.S_IFREG,
-				Ino:  ino,
-			})
-		} else {
-			entries = append(entries, fuse.DirEntry{
-				Name: name,
-				Mode: syscall.S_IFDIR,
-				Ino:  ino,
-			})
-		}
+	entries, exists, err := d.rfs.listDirectoryEntries(d.path)
+	if err != nil || !exists {
+		return nil, syscall.ENOENT
 	}
-
-	return fs.NewListDirStream(entries), 0
+	var dirEntries []fuse.DirEntry
+	for _, entry := range entries {
+		mode := syscall.S_IFREG
+		if entry.isDir {
+			mode = syscall.S_IFDIR
+		}
+		ino := d.rfs.getInode(filepath.Join(d.path, entry.name))
+		dirEntries = append(dirEntries, fuse.DirEntry{Name: entry.name, Mode: uint32(mode), Ino: ino})
+	}
+	return fs.NewListDirStream(dirEntries), 0
 }
 
-// Lookup finds a child node by name in a directory
 func (d *RarFSDir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	// Ensure RAR archives in this directory have been scanned (lazy loading)
-	d.rfs.ensureDirScanned(d.path)
-
-	d.rfs.mu.RLock()
-
-	fullPath := filepath.Join(d.path, name)
-
-	// Check if it's a file
-	if entry, ok := d.rfs.fileEntries[fullPath]; ok {
-		ino := d.rfs.getInode(fullPath)
-		d.rfs.mu.RUnlock()
-		child := &RarFSFile{rfs: d.rfs, path: fullPath, entry: entry}
-		out.Size = uint64(entry.Size)
-		out.SetEntryTimeout(entryValidDuration)
-		out.SetAttrTimeout(attrValidDuration)
-		return d.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFREG, Ino: ino}), 0
+	isDir, file, found, err := d.rfs.lookupInDirectory(d.path, name)
+	if err != nil {
+		return nil, syscall.EIO
 	}
-
-	// Check if it's a directory
-	if _, ok := d.rfs.directories[fullPath]; ok {
-		ino := d.rfs.getInode(fullPath)
-		d.rfs.mu.RUnlock()
+	if !found {
+		return nil, syscall.ENOENT
+	}
+	fullPath := filepath.Join(d.path, name)
+	ino := d.rfs.getInode(fullPath)
+	if isDir {
 		child := &RarFSDir{rfs: d.rfs, path: fullPath}
 		out.SetEntryTimeout(entryValidDuration)
 		out.SetAttrTimeout(attrValidDuration)
 		return d.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFDIR, Ino: ino}), 0
 	}
-
-	// Check if it's in the directory listing
-	for _, n := range d.rfs.directories[d.path] {
-		if n == name {
-			// It's a directory that was implicitly created
-			ino := d.rfs.getInode(fullPath)
-			d.rfs.mu.RUnlock()
-			child := &RarFSDir{rfs: d.rfs, path: fullPath}
-			out.SetEntryTimeout(entryValidDuration)
-			out.SetAttrTimeout(attrValidDuration)
-			return d.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFDIR, Ino: ino}), 0
-		}
-	}
-
-	d.rfs.mu.RUnlock()
-	return nil, syscall.ENOENT
+	child := &RarFSFile{rfs: d.rfs, path: fullPath, entry: file}
+	out.Size = uint64(file.Size)
+	out.SetEntryTimeout(entryValidDuration)
+	out.SetAttrTimeout(attrValidDuration)
+	return d.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFREG, Ino: ino}), 0
 }
 
-// Getattr returns file attributes
 func (f *RarFSFile) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	out.Mode = 0644 | syscall.S_IFREG
 	out.Size = uint64(f.entry.Size)
-	f.rfs.mu.RLock()
 	out.Ino = f.rfs.getInode(f.path)
-	f.rfs.mu.RUnlock()
 	out.SetTimeout(attrValidDuration)
 	out.SetTimes(nil, nil, nil)
 	return 0
 }
 
-// Open opens the file for reading
 func (f *RarFSFile) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	return &RarFileHandle{entry: f.entry}, fuse.FOPEN_KEEP_CACHE, 0
 }
 
-// Read reads data from the file
 func (f *RarFSFile) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	rfh, ok := fh.(*RarFileHandle)
 	if !ok {
 		return nil, syscall.EIO
 	}
-
 	data, err := rfh.ReadAt(dest, off)
 	if err != nil && err != io.EOF {
 		return nil, syscall.EIO
 	}
-
 	return fuse.ReadResultData(data), 0
 }
 
-// RarFileHandle handles file operations using streaming reads
-// This implementation reads data directly from the archive on each read operation,
-// avoiding loading entire files into memory. This is suitable for large files.
 type RarFileHandle struct {
 	entry *FileEntry
 	mu    sync.Mutex
 }
 
-// ReadAt reads data at the specified offset using streaming extraction
-// For pass-through files, reads directly from the source file
 func (h *RarFileHandle) ReadAt(dest []byte, off int64) ([]byte, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-
-	// Handle pass-through files
 	if h.entry.IsPassthrough {
-		logger.Debug("reading pass-through file", "file", h.entry.SourcePath, "offset", off, "size", len(dest))
 		return readPassthroughFileRange(h.entry.SourcePath, off, int64(len(dest)))
 	}
-
-	logger.Debug("reading file", "file", h.entry.InternalPath, "offset", off, "size", len(dest))
-
-	data, err := extractFileRange(h.entry.ArchivePath, h.entry.InternalPath, off, int64(len(dest)))
-	if err != nil {
-		logger.Warn("error reading file", "file", h.entry.InternalPath, "error", err)
-		return nil, err
+	if isZipFile(h.entry.ArchivePath) {
+		return extractZipFileRange(h.entry.ArchivePath, h.entry.InternalPath, off, int64(len(dest)))
 	}
-
-	return data, nil
+	return extractFileRange(h.entry.ArchivePath, h.entry.InternalPath, off, int64(len(dest)))
 }
 
-// readPassthroughFileRange reads a range of bytes from a regular file
 func readPassthroughFileRange(sourcePath string, offset, length int64) ([]byte, error) {
-	// Cap the read size to prevent excessive memory allocation
 	if length > maxReadSize {
 		length = maxReadSize
 	}
-
 	file, err := os.Open(sourcePath)
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		_ = file.Close()
-	}()
-
-	// Seek to offset
+	defer func() { _ = file.Close() }()
 	_, err = file.Seek(offset, io.SeekStart)
 	if err != nil {
 		return nil, err
 	}
-
-	// Read the requested length
 	result := make([]byte, length)
 	n, err := io.ReadFull(file, result)
 	if err == io.EOF || err == io.ErrUnexpectedEOF {
-		// Partial read at end of file
 		if n == 0 {
 			return nil, io.EOF
 		}
@@ -1033,24 +629,54 @@ func readPassthroughFileRange(sourcePath string, offset, length int64) ([]byte, 
 	return result[:n], nil
 }
 
-// extractFileRange extracts a specific range of bytes from a file in a RAR archive
-// This streams through the archive and only reads the requested portion,
-// avoiding loading the entire file into memory
-// Uses OpenReader to properly handle multi-volume archives
-func extractFileRange(archivePath, internalPath string, offset, length int64) ([]byte, error) {
-	// Cap the read size to prevent excessive memory allocation
+func extractZipFileRange(archivePath, internalPath string, offset, length int64) ([]byte, error) {
 	if length > maxReadSize {
 		length = maxReadSize
 	}
+	r, err := zip.OpenReader(archivePath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = r.Close() }()
+	for _, f := range r.File {
+		if normalizeArchivePath(f.Name) != internalPath {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = rc.Close() }()
+		if offset > 0 {
+			if _, err := io.CopyN(io.Discard, rc, offset); err != nil && err != io.EOF {
+				return nil, err
+			}
+		}
+		result := make([]byte, length)
+		n, err := io.ReadFull(rc, result)
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			if n == 0 {
+				return nil, io.EOF
+			}
+			return result[:n], nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		return result[:n], nil
+	}
+	return nil, os.ErrNotExist
+}
 
+func extractFileRange(archivePath, internalPath string, offset, length int64) ([]byte, error) {
+	if length > maxReadSize {
+		length = maxReadSize
+	}
 	reader, err := rardecode.OpenReader(archivePath)
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		_ = reader.Close()
-	}()
-
+	defer func() { _ = reader.Close() }()
 	for {
 		header, err := reader.Next()
 		if err == io.EOF {
@@ -1059,81 +685,48 @@ func extractFileRange(archivePath, internalPath string, offset, length int64) ([
 		if err != nil {
 			return nil, err
 		}
-
-		if header.Name == internalPath {
-			// Skip to the offset position
-			if offset > 0 {
-				skipped, err := io.CopyN(io.Discard, reader, offset)
-				if err != nil && err != io.EOF {
-					return nil, err
-				}
-				if skipped < offset {
-					// Offset is beyond end of file
-					return nil, io.EOF
-				}
-			}
-
-			// Read the requested length
-			result := make([]byte, length)
-			n, err := io.ReadFull(reader, result)
-			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				// Partial read at end of file
-				if n == 0 {
-					return nil, io.EOF
-				}
-				return result[:n], nil
-			}
-			if err != nil {
+		if normalizeArchivePath(header.Name) != internalPath {
+			continue
+		}
+		if offset > 0 {
+			if _, err := io.CopyN(io.Discard, reader, offset); err != nil && err != io.EOF {
 				return nil, err
+			}
+		}
+		result := make([]byte, length)
+		n, err := io.ReadFull(reader, result)
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			if n == 0 {
+				return nil, io.EOF
 			}
 			return result[:n], nil
 		}
+		if err != nil {
+			return nil, err
+		}
+		return result[:n], nil
 	}
-
 	return nil, os.ErrNotExist
 }
 
-// Mount mounts the RAR filesystem at the specified mount point
-func Mount(sourceDir, mountPoint string, allowOther bool, layout ArchiveLayout) (*fuse.Server, *RarFS, error) {
-	logger.Info("mounting filesystem", "source", sourceDir, "mountPoint", mountPoint, "allowOther", allowOther, "layout", layout)
-
-	rfs, err := NewRarFS(sourceDir, layout)
+func Mount(sourceDir, mountPoint string, allowOther bool) (*fuse.Server, *RarFS, error) {
+	logger.Info("mounting filesystem", "source", sourceDir, "mountPoint", mountPoint, "allowOther", allowOther)
+	rfs, err := NewRarFS(sourceDir)
 	if err != nil {
 		logger.Error("failed to create filesystem", "error", err)
 		return nil, nil, err
 	}
-
-	logger.Debug("filesystem created", "rootDirs", len(rfs.directories[""]), "pendingDirs", len(rfs.pendingDirs))
-
 	root := &RarFSRoot{rfs: rfs}
-
-	opts := &fs.Options{
-		MountOptions: fuse.MountOptions{
-			AllowOther: allowOther,
-			Debug:      false,
-			FsName:     "roar",
-			Name:       "roar",
-		},
-	}
-
+	opts := &fs.Options{MountOptions: fuse.MountOptions{AllowOther: allowOther, Debug: false, FsName: "roar", Name: "roar"}}
 	server, err := fs.Mount(mountPoint, root, opts)
 	if err != nil {
 		logger.Error("failed to mount filesystem", "error", err)
-		_ = rfs.Close()
 		return nil, nil, err
 	}
-
-	// Wait a moment for the mount to be fully established
-	logger.Debug("waiting for mount to stabilize")
-
 	logger.Info("filesystem mounted successfully")
 	return server, rfs, nil
 }
 
-// Close cleans up resources used by the filesystem
 func (r *RarFS) Close() error {
-	if r.watcher != nil {
-		return r.watcher.Close()
-	}
 	return nil
 }

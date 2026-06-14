@@ -1,6 +1,8 @@
 tmp/
 ├── readme.txt
-└── split
-    └── complete
+├── split
+│   └── complete
+├── split.r00
+└── split.r01
 
-2 directories, 2 files
+2 directories, 4 files

@@ -1,6 +1,5 @@
 tmp/
-└── tests
-    └── data
-        └── complete
+└── example
+    └── complete
 
-3 directories, 1 file
+2 directories, 1 file
