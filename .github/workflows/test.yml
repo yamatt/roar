@@ -61,7 +61,6 @@ jobs:
       - name: Run tests
         run: go test -v ./...
 
-
   functional-test-scenarios:
     name: Functional Test Scenarios
     runs-on: ubuntu-latest
@@ -100,7 +99,7 @@ jobs:
       - name: Verify test ${{ matrix.test-name }} matches expected output
         run: |
           tree ${{ runner.temp }}/roar-mount/test > ${{ runner.temp }}/roar-mount-test-output.txt
-          diff tests/data/functional-tests/results/${{ matrix.test-name }} ${{ runner.temp }}/roar-mount-test-output.txt
+          diff tests/data/functional-tests/results/${{ matrix.test-name }}.txt ${{ runner.temp }}/roar-mount-test-output.txt
 
   functional-test-rescan:
     name: Functional Test Scenarios
