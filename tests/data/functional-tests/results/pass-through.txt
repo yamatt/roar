@@ -1,4 +1,4 @@
-tmp/
+.
 ├── example
 │   └── complete
 └── info.txt

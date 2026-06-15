@@ -1,4 +1,4 @@
-tmp/
+.
 ├── split
 │   └── complete
 ├── split.part2
