@@ -92,7 +92,7 @@ jobs:
           mkdir -p ${{ runner.temp }}/roar-mount/test
           ./roar tests/data/functional-tests/examples/${{ matrix.test-name }} ${{ runner.temp }}/roar-mount/test &
           sleep 1
-          cd "{{ runner.temp }}/roar-mount/test"
+          cd "$RUNNER_TEMP/roar-mount/test"
           tree . > ${{ runner.temp }}/roar-mount-test-output.txt
           cd ~
           diff tests/data/functional-tests/results/${{ matrix.test-name }}.txt ${{ runner.temp }}/roar-mount-test-output.txt
