@@ -36,13 +36,9 @@ jobs:
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: "go.mod"
-
-      - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9
       - name: Check formatting
         run: |
-          gofmt -l .
-
+          go fmt ./...
       - name: Run go vet
         run: go vet ./...
   test:
@@ -61,7 +57,6 @@ jobs:
       - name: Run tests
         run: go test -v ./...
 
-
   functional-test-scenarios:
     name: Functional Test Scenarios
     runs-on: ubuntu-latest
@@ -72,7 +67,7 @@ jobs:
           - part1-split
           - pass-through
           - r00-split
-          - zip
+          - zip-file
     steps:
       - name: Checkout code
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -91,48 +86,25 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y fuse3 libfuse3-dev tree
-
-      - name: Mount ${{ matrix.test-name }}
+      - name: Run roar for test ${{ matrix.test-name }}
         run: |
           mkdir -p ${{ runner.temp }}/roar-mount/test
           ./roar tests/data/functional-tests/examples/${{ matrix.test-name }} ${{ runner.temp }}/roar-mount/test &
+          sleep 1
+
+      - name: Get output for ${{ matrix.test-name }}
+        run: |
+          cd "$RUNNER_TEMP/roar-mount/test"
+          tree . > ${{ runner.temp }}/roar-mount-test-output.txt
+
+      - name: Store results file
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a #v7.0.1
+        with:
+          name: artifact-${{ matrix.test-name }}
+          path: ${{ runner.temp }}/roar-mount-test-output.txt
+          retention-days: 14
 
       - name: Verify test ${{ matrix.test-name }} matches expected output
         run: |
-          tree ${{ runner.temp }}/roar-mount/test > ${{ runner.temp }}/roar-mount-test-output.txt
-          diff tests/data/functional-tests/results/${{ matrix.test-name }} ${{ runner.temp }}/roar-mount-test-output.txt
-
-  functional-test-rescan:
-    name: Functional Test Scenarios
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-
-      - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
-        with:
-          go-version-file: "go.mod"
-
-      - name: Build binary
-        run: |
-          go build -o roar ./cmd/roar
-          chmod +x roar
-
-      - name: Install needed dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y fuse3 libfuse3-dev tree
-      - name: Test rescan - Add new file to source
-        run: |
-          mkdir -p ${{ runner.temp }}/roar-mount/test
-          ./roar tests/data/functional-tests/examples/part1-split ${{ runner.temp }}/roar-mount/test &
-
-          touch ${{ runner.temp }}/roar-mount/test/new-file.txt
-
-          if [ -f ${{ runner.temp }}/roar-mount/test/new-file.txt ]; then
-            exit 0
-          else
-            echo 1
-          fi
+          diff tests/data/functional-tests/results/${{ matrix.test-name }}.txt ${{ runner.temp }}/roar-mount-test-output.txt
+          

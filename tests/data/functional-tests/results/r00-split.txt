@@ -1,0 +1,8 @@
+.
+├── readme.txt
+├── split
+│   └── complete
+├── split.r00
+└── split.r01
+
+2 directories, 4 files

@@ -1,0 +1,7 @@
+.
+├── split
+│   └── complete
+├── split.part2
+└── split.part3
+
+4 directories, 1 file
