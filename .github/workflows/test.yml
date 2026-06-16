@@ -86,14 +86,25 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y fuse3 libfuse3-dev tree
-
-      - name: Verify test ${{ matrix.test-name }} matches expected output
+      - name: Run roar for test ${{ matrix.test-name }}
         run: |
           mkdir -p ${{ runner.temp }}/roar-mount/test
           ./roar tests/data/functional-tests/examples/${{ matrix.test-name }} ${{ runner.temp }}/roar-mount/test &
           sleep 1
+
+      - name: Get output for ${{ matrix.test-name }}
+        run: |
           cd "$RUNNER_TEMP/roar-mount/test"
           tree . > ${{ runner.temp }}/roar-mount-test-output.txt
-          cd "$GITHUB_WORKSPACE"
+
+      - name: Store results file
+        uses: actions/upload-artifact@v7
+        with:
+          name: artifact-${{ matrix.test-name }}
+          path: ${{ runner.temp }}/roar-mount-test-output.txt
+          retention-days: 14
+
+      - name: Verify test ${{ matrix.test-name }} matches expected output
+        run: |
           diff tests/data/functional-tests/results/${{ matrix.test-name }}.txt ${{ runner.temp }}/roar-mount-test-output.txt
           
