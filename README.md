@@ -1,6 +1,6 @@
 # roar 🦁
 
-[![CI](https://github.com/yamatt/roar/actions/workflows/build.yml/badge.svg)](https://github.com/yamatt/roar/actions/workflows/build.yml)
+[![Test](https://github.com/yamatt/roar/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/yamatt/roar/actions/workflows/test.yml)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/yamatt/roar)](https://github.com/yamatt/roar/blob/main/go.mod)
 [![Go Report Card](https://goreportcard.com/badge/github.com/yamatt/roar)](https://goreportcard.com/report/github.com/yamatt/roar)
 [![License](https://img.shields.io/github/license/yamatt/roar)](https://github.com/yamatt/roar/blob/main/LICENSE)
