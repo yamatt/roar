@@ -94,6 +94,6 @@ jobs:
           sleep 1
           cd "$RUNNER_TEMP/roar-mount/test"
           tree . > ${{ runner.temp }}/roar-mount-test-output.txt
-          cd ~
+          cd "$GITHUB_WORKSPACE"
           diff tests/data/functional-tests/results/${{ matrix.test-name }}.txt ${{ runner.temp }}/roar-mount-test-output.txt
           
