@@ -1,7 +1,7 @@
 .
 ├── readme.txt
 ├── split
-│   └── complete
+│   └── complete
 ├── split.r00
 └── split.r01
 
