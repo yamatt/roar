@@ -1,6 +1,6 @@
 .
 ├── example
-│   └── complete
+│   └── complete
 └── info.txt
 
 2 directories, 2 files
