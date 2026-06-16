@@ -93,9 +93,9 @@ jobs:
           ./roar tests/data/functional-tests/examples/${{ matrix.test-name }} ${{ runner.temp }}/roar-mount/test &
 
       - name: Verify test ${{ matrix.test-name }} matches expected output
-        working-directory: "{{ runner.temp }}/roar-mount/test"
         run: |
+          cd "{{ runner.temp }}/roar-mount/test"
           tree . > ${{ runner.temp }}/roar-mount-test-output.txt
-      - name: Compare test ${{ matrix.test-name }} output with expected output
-        run: |
+          cd ~
           diff tests/data/functional-tests/results/${{ matrix.test-name }}.txt ${{ runner.temp }}/roar-mount-test-output.txt
+          
