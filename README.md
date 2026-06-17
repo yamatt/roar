@@ -1,6 +1,7 @@
 # roar 🦁
 
 [![Test](https://github.com/yamatt/roar/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/yamatt/roar/actions/workflows/test.yml)
+[![Coverage](https://img.shields.io/github/actions/workflow/status/yamatt/roar/test.yml?branch=main&label=coverage)](https://github.com/yamatt/roar/actions/workflows/test.yml)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/yamatt/roar)](https://github.com/yamatt/roar/blob/main/go.mod)
 [![Go Report Card](https://goreportcard.com/badge/github.com/yamatt/roar)](https://goreportcard.com/report/github.com/yamatt/roar)
 [![License](https://img.shields.io/github/license/yamatt/roar)](https://github.com/yamatt/roar/blob/main/LICENSE)
@@ -208,6 +209,13 @@ Run tests with verbose output:
 
 ```bash
 go test ./internal/roar -v
+```
+
+Run tests with coverage:
+
+```bash
+go test -covermode=atomic -coverprofile=coverage.out ./...
+go tool cover -func=coverage.out
 ```
 
 The test suite includes:

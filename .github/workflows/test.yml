@@ -11,10 +11,12 @@ on:
       - "**.go"
       - "cmd/**"
       - "internal/**"
+      - ".github/workflows/test.yml"
       - "go.mod"
       - "go.sum"
       - ".dockerignore"
       - "Dockerfile"
+      - "README.md"
 
 permissions:
   contents: read
@@ -58,8 +60,31 @@ jobs:
         with:
           go-version-file: "go.mod"
 
-      - name: Run tests
-        run: go test -v ./...
+      - name: Run tests with coverage
+        run: go test -v -covermode=atomic -coverprofile=coverage.out ./...
+
+      - name: Output coverage summary
+        run: |
+          go tool cover -func=coverage.out | tee coverage.txt
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ { print $3 }')
+          {
+            echo "### Go coverage"
+            echo
+            echo "Total coverage: ${total}"
+            echo
+            echo '```'
+            cat coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a #v7.0.1
+        with:
+          name: coverage-report
+          path: |
+            coverage.out
+            coverage.txt
+          retention-days: 14
 
   functional-test-scenarios:
     name: Functional Test Scenarios
