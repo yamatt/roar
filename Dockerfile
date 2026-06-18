@@ -19,7 +19,7 @@ COPY . .
 RUN CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION}" -o roar ./cmd/roar
 
 # Runtime stage
-FROM alpine:3.24.0
+FROM alpine:3.24.1
 
 # Install FUSE runtime dependencies
 RUN apk add --no-cache fuse
