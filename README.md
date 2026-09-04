@@ -3,7 +3,6 @@
 [![Test](https://github.com/yamatt/roar/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/yamatt/roar/actions/workflows/test.yml)
 [![codecov](https://codecov.io/gh/yamatt/roar/graph/badge.svg)](https://codecov.io/gh/yamatt/roar)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/yamatt/roar)](https://github.com/yamatt/roar/blob/main/go.mod)
-[![Go Report Card](https://goreportcard.com/badge/github.com/yamatt/roar)](https://goreportcard.com/report/github.com/yamatt/roar)
 [![License](https://img.shields.io/github/license/yamatt/roar)](https://github.com/yamatt/roar/blob/main/LICENSE)
 [![Release](https://img.shields.io/github/v/release/yamatt/roar)](https://github.com/yamatt/roar/releases/latest)
 [![Docker Image](https://img.shields.io/badge/Docker-ghcr.io%2Fyamatt%2Froar-blue?logo=docker)](https://ghcr.io/yamatt/roar)
