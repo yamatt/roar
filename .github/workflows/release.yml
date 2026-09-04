@@ -78,7 +78,7 @@ jobs:
           chmod +x artifacts/*/*
           gh release create '${{ github.ref_name }}' \
             --title='${{ steps.tag_info.outputs.tag_message }}' \
-            --generate-release-notes \
+            --generate-notes \
             artifacts/*/*
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
