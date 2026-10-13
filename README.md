@@ -31,36 +31,42 @@ A FUSE filesystem that takes directories containing RAR and ZIP archives and pre
 #### Installing FUSE Libraries
 
 **Debian/Ubuntu:**
+
 ```bash
 sudo apt-get install fuse libfuse2
 ```
 
 **Fedora/RHEL/CentOS:**
+
 ```bash
 sudo dnf install fuse fuse-libs
 ```
 
 **Arch Linux:**
+
 ```bash
 sudo pacman -S fuse2
 ```
 
 ### Build Requirements
 
-- Go 1.26 or later
+- Go 1.27 or later
 - FUSE development headers (for building)
 
 **Debian/Ubuntu:**
+
 ```bash
 sudo apt-get install libfuse-dev
 ```
 
 **Fedora/RHEL/CentOS:**
+
 ```bash
 sudo dnf install fuse-devel
 ```
 
 **Arch Linux:**
+
 ```bash
 sudo pacman -S fuse2
 ```
@@ -168,6 +174,7 @@ sudo nano /etc/fuse.conf
 ```
 
 Uncomment or add this line:
+
 ```
 user_allow_other
 ```
@@ -211,6 +218,7 @@ go test ./internal/roar -v
 ```
 
 The test suite includes:
+
 - Unit tests for RAR file detection and archive scanning
 - Integration tests with real RAR archives (in `tests/data/`)
 - Filesystem watcher tests for inotify functionality

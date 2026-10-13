@@ -1,6 +1,6 @@
 module github.com/yamatt/roar
 
-go 1.26.2
+go 1.27.1
 
 require (
 	github.com/hanwen/go-fuse/v2 v2.11.0
