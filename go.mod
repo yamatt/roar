@@ -3,7 +3,7 @@ module github.com/yamatt/roar
 go 1.27.1
 
 require (
-	github.com/hanwen/go-fuse/v2 v2.12.0
+	github.com/hanwen/go-fuse/v2 v2.12.1
 	github.com/nwaples/rardecode/v2 v2.4.5
 )
 
