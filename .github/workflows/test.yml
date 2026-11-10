@@ -31,12 +31,12 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        uses: actions/setup-go@v7.0.0
         with:
           go-version-file: "go.mod"
       - name: Check formatting
@@ -50,24 +50,24 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        uses: actions/setup-go@v7.0.0
         with:
           go-version-file: "go.mod"
 
       - name: Run tests
         run: go test -v -covermode=atomic -coverprofile=coverage.txt ./...
       - name: Upload artifact
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 #v7.0.2
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: coverage
           path: coverage.txt
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 #v7
+        uses: codecov/codecov-action@v7.1.1
         with:
           files: ./coverage.txt
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -85,12 +85,12 @@ jobs:
           - zip-file
     steps:
       - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        uses: actions/setup-go@v7.0.0
         with:
           go-version-file: "go.mod"
 
@@ -115,7 +115,7 @@ jobs:
           tree . > ${{ runner.temp }}/roar-mount-test-output.txt
 
       - name: Store results file
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 #v7.0.2
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: artifact-${{ matrix.test-name }}
           path: ${{ runner.temp }}/roar-mount-test-output.txt
