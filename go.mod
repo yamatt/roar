@@ -4,7 +4,7 @@ go 1.27.1
 
 require (
 	github.com/hanwen/go-fuse/v2 v2.12.1
-	github.com/nwaples/rardecode/v2 v2.4.5
+	github.com/nwaples/rardecode/v2 v2.4.6
 )
 
 require golang.org/x/sys v0.28.0 // indirect
